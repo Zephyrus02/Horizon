@@ -1,0 +1,181 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  build-and-test:
+    name: Build, Test & Package
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Git LFS Pull
+        run: git lfs pull
+
+      - name: Select Xcode Version
+        run: |
+          if [ -d "/Applications/Xcode_16.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app
+          elif [ -d "/Applications/Xcode_16.0.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.0.app
+          elif [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app
+          fi
+          xcodebuild -version
+
+      - name: Run Tests with Code Coverage
+        id: run_tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project Horizon.xcodeproj \
+            -scheme Horizon \
+            -destination 'platform=macOS' \
+            -enableCodeCoverage YES \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee test_build.log
+        continue-on-error: true
+
+      - name: Extract Code Coverage
+        if: always()
+        run: |
+          if [ -d "TestResults.xcresult" ]; then
+            xcrun xccov view --report --json TestResults.xcresult > coverage.json 2>/dev/null || true
+            xcrun xccov view --report TestResults.xcresult > coverage_report.txt 2>/dev/null || true
+          fi
+
+      - name: Build Release App (.app)
+        id: build_app
+        if: steps.run_tests.outcome == 'success'
+        run: |
+          xcodebuild build \
+            -project Horizon.xcodeproj \
+            -scheme Horizon \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+        continue-on-error: true
+
+      - name: Package Horizon DMG
+        id: package_dmg
+        if: steps.build_app.outcome == 'success'
+        run: |
+          mkdir -p dmg_root
+          cp -R build/Build/Products/Release/Horizon.app dmg_root/
+          ln -s /Applications dmg_root/Applications
+          hdiutil create -volname "Horizon" -srcfolder dmg_root -ov -format UDZO Horizon.dmg
+        continue-on-error: true
+
+      - name: Generate CI Summary Report
+        if: always()
+        run: |
+          python3 .github/scripts/generate_ci_report.py test_build.log coverage.json coverage_report.txt Horizon.dmg
+
+      - name: Upload DMG Artifact
+        if: always() && steps.package_dmg.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Horizon-macOS-DMG
+          path: Horizon.dmg
+          if-no-files-found: ignore
+
+      - name: Upload Test Report & Coverage Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Horizon-Test-Report
+          path: |
+            test_report.md
+            coverage_report.txt
+            coverage.json
+            test_build.log
+            TestResults.xcresult
+          if-no-files-found: ignore
+
+      - name: Post or Update PR Comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('pr_comment.md')) {
+              console.log('pr_comment.md does not exist. Skipping comment.');
+              return;
+            }
+            const body = fs.readFileSync('pr_comment.md', 'utf8');
+            const issue_number = context.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number
+            });
+
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && comment.body.includes('<!-- horizon-ci-summary -->')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: botComment.id,
+                body
+              });
+              console.log('Updated existing PR comment #' + botComment.id);
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+              console.log('Created new PR comment.');
+            }
+
+      - name: Enforce CI Check Outcome
+        if: always()
+        run: |
+          if [ "${{ steps.run_tests.outcome }}" != "success" ]; then
+            echo "❌ Test run failed."
+            exit 1
+          fi
+          if [ "${{ steps.build_app.outcome }}" != "success" ]; then
+            echo "❌ Application build failed."
+            exit 1
+          fi
+          if [ "${{ steps.package_dmg.outcome }}" != "success" ]; then
+            echo "❌ DMG packaging failed."
+            exit 1
+          fi
+          echo "✅ All CI checks passed!"
+
