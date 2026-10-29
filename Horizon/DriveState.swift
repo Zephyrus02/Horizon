@@ -82,7 +82,10 @@ struct RemoteAccount: Identifiable, Codable, Equatable, Hashable {
         if let accName = accountName, !accName.isEmpty {
             return accName
         }
-        return "Google Drive"
+        if name == "gdrive" {
+            return "Google Drive"
+        }
+        return "Google Drive (\(name))"
     }
 
     var providerDisplayName: String {

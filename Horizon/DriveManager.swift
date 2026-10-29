@@ -204,38 +204,6 @@ final class DriveManager: ObservableObject {
         }
     }
 
-    // Fetch user info for a specific remote in the background
-    func fetchUserInfo(for remoteName: String) async -> (email: String?, name: String?) {
-        guard let rclone = Self.findRcloneExecutable() else { return (nil, nil) }
-
-        return await Task.detached { [configPath] in
-            let pipe = Pipe()
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: rclone)
-            proc.arguments = ["config", "userinfo", "\(remoteName):", "--config", configPath, "--json"]
-            proc.standardOutput = pipe
-
-            var env = ProcessInfo.processInfo.environment
-            let extraPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-            env["PATH"] = extraPaths + ":" + (env["PATH"] ?? "")
-            proc.environment = env
-
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-                if proc.terminationStatus == 0 {
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    if let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        let email = (dict["email"] as? String) ?? (dict["user"] as? String)
-                        let name = dict["name"] as? String
-                        return (email, name)
-                    }
-                }
-            } catch {}
-            return (nil, nil)
-        }.value
-    }
-
     // MARK: - OAuth Setup Flow (Zero Keys Required)
 
     func startGoogleDriveConnection() async -> Bool {
@@ -278,58 +246,58 @@ final class DriveManager: ObservableObject {
 
         let errPipe = Pipe()
         proc.standardError = errPipe
+        proc.standardOutput = FileHandle.nullDevice
+
+        let errHandle = errPipe.fileHandleForReading
+        var capturedStderr = ""
+        let syncQueue = DispatchQueue(label: "horizon.auth.stderr")
+        errHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
+                syncQueue.sync {
+                    capturedStderr += str
+                }
+            }
+        }
 
         self.currentAuthProcess = proc
 
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                do {
-                    try proc.run()
-                    proc.waitUntilExit()
-
-                    Task { @MainActor [weak self] in
-                        guard let self = self else {
-                            continuation.resume(returning: false)
-                            return
-                        }
-                        self.currentAuthProcess = nil
-
-                        if proc.terminationStatus == 0 {
-                            self.authStatusText = "Authorization successful! Connecting drive..."
-
-                            // Fetch user info for a nice display
-                            let userInfo = await self.fetchUserInfo(for: remoteName)
-
-                            self.refreshAccounts()
-                            if var newlyAdded = self.accounts.first(where: { $0.name == remoteName }) {
-                                newlyAdded.accountEmail = userInfo.email
-                                newlyAdded.accountName = userInfo.name
-                                self.activeAccount = newlyAdded
-                            }
-
-                            self.hasCompletedOnboarding = true
-                            self.isAuthenticating = false
-
-                            // Automatically mount the freshly connected drive!
-                            self.connect()
-                            continuation.resume(returning: true)
-                        } else {
-                            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                            let errString = String(data: errData, encoding: .utf8) ?? "Authentication process failed."
-                            self.authError = errString.trimmingCharacters(in: .whitespacesAndNewlines)
-                            self.isAuthenticating = false
-                            continuation.resume(returning: false)
-                        }
-                    }
-                } catch {
-                    Task { @MainActor [weak self] in
-                        self?.currentAuthProcess = nil
-                        self?.authError = error.localizedDescription
-                        self?.isAuthenticating = false
-                        continuation.resume(returning: false)
-                    }
-                }
+        let (exitCode, didRun) = await Task.detached { () -> (Int32, Bool) in
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                return (proc.terminationStatus, true)
+            } catch {
+                return (-1, false)
             }
+        }.value
+
+        errHandle.readabilityHandler = nil
+        self.currentAuthProcess = nil
+
+        if didRun && exitCode == 0 {
+            self.authStatusText = "Authorization successful! Connecting drive..."
+            self.refreshAccounts()
+            if let newlyAdded = self.accounts.first(where: { $0.name == remoteName }) {
+                self.activeAccount = newlyAdded
+            } else if let first = self.accounts.first {
+                self.activeAccount = first
+            }
+
+            self.hasCompletedOnboarding = true
+            self.isAuthenticating = false
+
+            // Automatically mount the freshly connected drive!
+            self.connect()
+            return true
+        } else {
+            var errorText = ""
+            syncQueue.sync {
+                errorText = capturedStderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            self.authError = errorText.isEmpty ? "Authentication failed or was cancelled." : errorText
+            self.isAuthenticating = false
+            return false
         }
     }
 
@@ -356,6 +324,8 @@ final class DriveManager: ObservableObject {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: rclone)
             proc.arguments = ["config", "delete", account.name, "--config", configPath]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
 
             var env = ProcessInfo.processInfo.environment
             let extraPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -388,6 +358,8 @@ final class DriveManager: ObservableObject {
             let procDisconnect = Process()
             procDisconnect.executableURL = URL(fileURLWithPath: rclone)
             procDisconnect.arguments = ["config", "disconnect", "\(account.name):", "--config", configPath]
+            procDisconnect.standardOutput = FileHandle.nullDevice
+            procDisconnect.standardError = FileHandle.nullDevice
 
             var env = ProcessInfo.processInfo.environment
             let extraPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -401,6 +373,8 @@ final class DriveManager: ObservableObject {
             let procDelete = Process()
             procDelete.executableURL = URL(fileURLWithPath: rclone)
             procDelete.arguments = ["config", "delete", account.name, "--config", configPath]
+            procDelete.standardOutput = FileHandle.nullDevice
+            procDelete.standardError = FileHandle.nullDevice
             procDelete.environment = env
             try? procDelete.run()
             procDelete.waitUntilExit()

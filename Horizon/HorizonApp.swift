@@ -10,6 +10,21 @@ import SwiftUI
 import Combine
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let driveManager = DriveManager.shared
+
+        if !driveManager.hasCompletedOnboarding || !driveManager.hasConfiguredAccounts {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                WindowManager.shared.showSetup()
+            }
+        } else {
+            NSApp.setActivationPolicy(.accessory)
+            if driveManager.activeAccount != nil && !driveManager.state.isConnected {
+                driveManager.connect()
+            }
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         DriveManager.shared.disconnectSync()
     }
@@ -34,4 +49,3 @@ struct HorizonApp: App {
         .menuBarExtraStyle(.window)
     }
 }
-

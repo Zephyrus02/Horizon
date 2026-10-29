@@ -222,7 +222,7 @@ struct SetupView: View {
                             }
                             .controlSize(.small)
                         }
-                    } else if driveManager.state.isConnected {
+                    } else if driveManager.state.isConnected || driveManager.hasConfiguredAccounts {
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundStyle(.green)
@@ -360,7 +360,7 @@ struct SetupView: View {
             } else if driveManager.isAuthenticating {
                 HStack(spacing: 8) {
                     Image(systemName: "safari")
-                        .foregroundStyle(.accentColor)
+                        .foregroundStyle(Color.accentColor)
                     Text("Check your web browser to approve Google Drive access.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
