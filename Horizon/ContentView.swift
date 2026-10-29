@@ -15,7 +15,7 @@ struct ContentView: View {
         VStack(spacing: 12) {
             // Header: App Title & Status Pill
             HStack(alignment: .center) {
-                HStack(spacing: 6) {
+                HStack(spacing: 7) {
                     if let nsImage = NSImage(named: "MenuBarIcon") {
                         Image(nsImage: nsImage)
                             .resizable()
@@ -55,57 +55,87 @@ struct ContentView: View {
 
             Divider()
 
-            // Main Connection Card with Connect Toggle
-            VStack(spacing: 10) {
-                HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Google Drive")
-                            .font(.system(size: 13, weight: .medium))
+            // Main Account Card or Empty State
+            if driveManager.accounts.isEmpty {
+                VStack(spacing: 10) {
+                    Text("No Accounts Connected")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
 
-                        Text("~/GDrive")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    Toggle(isOn: Binding(
-                        get: {
-                            driveManager.state.isConnected || driveManager.state == .connecting
-                        },
-                        set: { shouldConnect in
-                            if shouldConnect {
-                                driveManager.connect()
-                            } else {
-                                driveManager.disconnect()
-                            }
+                    Button {
+                        WindowManager.shared.showSetup()
+                    } label: {
+                        HStack(spacing: 6) {
+                            GoogleDriveLogoView(size: 16)
+                            Text("Set Up Google Drive")
+                                .fontWeight(.semibold)
                         }
-                    )) {
-                        Text("Connect")
-                            .font(.system(size: 13, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
                     }
-                    .toggleStyle(.switch)
-                    .disabled(driveManager.state.isTransitioning)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
                 }
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+            } else {
+                VStack(spacing: 10) {
+                    HStack(alignment: .center, spacing: 10) {
+                        GoogleDriveLogoView(size: 22)
 
-                // Transitioning indicator
-                if driveManager.state.isTransitioning {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text(driveManager.state == .connecting ? "Mounting Google Drive..." : "Unmounting...")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(driveManager.activeAccount?.displayTitle ?? "Google Drive")
+                                .font(.system(size: 13, weight: .medium))
+                                .lineLimit(1)
+
+                            Text(driveManager.activeMountPath)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+
                         Spacer()
+
+                        Toggle(isOn: Binding(
+                            get: {
+                                driveManager.state.isConnected || driveManager.state == .connecting
+                            },
+                            set: { shouldConnect in
+                                if shouldConnect {
+                                    driveManager.connect()
+                                } else {
+                                    driveManager.disconnect()
+                                }
+                            }
+                        )) {
+                            Text("Connect")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .toggleStyle(.switch)
+                        .disabled(driveManager.state.isTransitioning)
                     }
-                    .padding(.top, 2)
+
+                    // Transitioning indicator
+                    if driveManager.state.isTransitioning {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text(driveManager.state == .connecting ? "Mounting Google Drive..." : "Unmounting...")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.top, 2)
+                    }
                 }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
             }
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
 
             // Error Notice (if any)
             if let error = driveManager.errorMessage {
@@ -159,6 +189,22 @@ struct ContentView: View {
                 .controlSize(.regular)
             }
 
+            // Settings Button
+            Button(action: {
+                WindowManager.shared.showSettings()
+            }) {
+                HStack {
+                    Image(systemName: "gearshape")
+                    Text("Settings...")
+                    Spacer()
+                }
+                .font(.system(size: 12))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+
             Divider()
 
             // Footer Actions
@@ -182,7 +228,7 @@ struct ContentView: View {
             }
         }
         .padding(14)
-        .frame(width: 290)
+        .frame(width: 300)
     }
 }
 
@@ -191,4 +237,3 @@ struct ContentView_Previews: PreviewProvider {
         ContentView(driveManager: DriveManager.shared)
     }
 }
-

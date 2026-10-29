@@ -65,3 +65,36 @@ enum DriveState: Equatable {
         }
     }
 }
+
+struct RemoteAccount: Identifiable, Codable, Equatable, Hashable {
+    var id: String { name }
+    let name: String
+    let provider: String
+    var accountName: String?
+    var accountEmail: String?
+    var mountPath: String
+    var isConnected: Bool = false
+
+    var displayTitle: String {
+        if let email = accountEmail, !email.isEmpty {
+            return email
+        }
+        if let accName = accountName, !accName.isEmpty {
+            return accName
+        }
+        return "Google Drive"
+    }
+
+    var providerDisplayName: String {
+        switch provider.lowercased() {
+        case "drive":
+            return "Google Drive"
+        case "onedrive":
+            return "OneDrive"
+        case "dropbox":
+            return "Dropbox"
+        default:
+            return provider.capitalized
+        }
+    }
+}
