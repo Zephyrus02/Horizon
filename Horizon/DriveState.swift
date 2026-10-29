@@ -67,25 +67,52 @@ enum DriveState: Equatable {
 }
 
 struct RemoteAccount: Identifiable, Codable, Equatable, Hashable {
-    var id: String { name }
-    let name: String
-    let provider: String
-    var accountName: String?
-    var accountEmail: String?
+    var id: String
+    var name: String
+    var displayName: String
+    var provider: String
     var mountPath: String
     var isConnected: Bool = false
+    var autoConnect: Bool = true
+    var createdAt: Date = Date()
+    var accountName: String? = nil
+    var accountEmail: String? = nil
+
+    init(
+        id: String = UUID().uuidString,
+        name: String,
+        displayName: String? = nil,
+        provider: String,
+        accountName: String? = nil,
+        accountEmail: String? = nil,
+        mountPath: String,
+        isConnected: Bool = false,
+        autoConnect: Bool = true,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.displayName = displayName ?? (accountName ?? name)
+        self.provider = provider
+        self.accountName = accountName
+        self.accountEmail = accountEmail
+        self.mountPath = mountPath
+        self.isConnected = isConnected
+        self.autoConnect = autoConnect
+        self.createdAt = createdAt
+    }
 
     var displayTitle: String {
+        if !displayName.isEmpty {
+            return displayName
+        }
         if let email = accountEmail, !email.isEmpty {
             return email
         }
         if let accName = accountName, !accName.isEmpty {
             return accName
         }
-        if name == "gdrive" {
-            return "Google Drive"
-        }
-        return "Google Drive (\(name))"
+        return name
     }
 
     var providerDisplayName: String {

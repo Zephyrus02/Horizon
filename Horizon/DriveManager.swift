@@ -14,10 +14,16 @@ import ServiceManagement
 final class DriveManager: ObservableObject {
     static let shared = DriveManager()
 
+    // Overall / Aggregate State
     @Published var state: DriveState = .disconnected
     @Published var errorMessage: String? = nil
     @Published var accounts: [RemoteAccount] = []
     @Published var activeAccount: RemoteAccount? = nil
+
+    // Multi-Account Independent States
+    @Published var accountStates: [String: DriveState] = [:] // keyed by account.id
+    @Published var accountSyncing: [String: Bool] = [:]      // keyed by account.id
+    @Published var accountLastSync: [String: Date] = [:]     // keyed by account.id
 
     // Authentication State
     @Published var isAuthenticating: Bool = false
@@ -26,15 +32,36 @@ final class DriveManager: ObservableObject {
 
     @Published var isLaunchAtLoginEnabled: Bool = false
 
+    // Aggregate Two-Way Sync
+    @Published var isSyncing: Bool = false
+    @Published var lastSyncTime: Date? = nil
+
+    var formattedLastSync: String {
+        guard let lastSync = lastSyncTime else { return "Ready to sync" }
+        let interval = Date().timeIntervalSince(lastSync)
+        if interval < 10 {
+            return "Synced just now"
+        } else if interval < 60 {
+            return "Synced \(Int(interval))s ago"
+        } else {
+            let minutes = Int(interval / 60)
+            return "Synced \(minutes)m ago"
+        }
+    }
+
+    private var syncTask: Task<Void, Never>? = nil
+
     let appSupportDir: String
     let configPath: String
     let cacheDir: String
     let logFile: String
     let defaultMountPath: String
 
-    private var currentProcess: Process?
+    // Multi-Process Tracking
+    private var runningProcesses: [String: Process] = [:] // keyed by account.id
+    private var accountRcPorts: [String: Int] = [:]       // unique RC port per account
+    private var userInitiatedDisconnects: Set<String> = []
     private var currentAuthProcess: Process?
-    private var isUserInitiatedDisconnect = false
 
     private let onboardingKey = "hasCompletedOnboarding"
 
@@ -51,6 +78,10 @@ final class DriveManager: ObservableObject {
         return !accounts.isEmpty
     }
 
+    var connectedCount: Int {
+        return accounts.filter { stateForAccount($0) == .connected }.count
+    }
+
     init() {
         self.defaultMountPath = (("~/GDrive" as NSString).expandingTildeInPath)
         self.appSupportDir = (("~/Library/Application Support/Horizon" as NSString).expandingTildeInPath)
@@ -58,7 +89,7 @@ final class DriveManager: ObservableObject {
         self.cacheDir = (("~/Library/Caches/Horizon/rclone" as NSString).expandingTildeInPath)
         self.logFile = (("~/Library/Logs/Horizon/rclone.log" as NSString).expandingTildeInPath)
 
-        // Ensure necessary directories exist
+        // Ensure necessary base directories exist
         try? FileManager.default.createDirectory(atPath: appSupportDir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(atPath: cacheDir, withIntermediateDirectories: true)
         let logDir = (logFile as NSString).deletingLastPathComponent
@@ -72,14 +103,12 @@ final class DriveManager: ObservableObject {
             self.isLaunchAtLoginEnabled = SMAppService.mainApp.status == .enabled
         }
 
-        // Load existing accounts
+        // Initialize SQLite and load accounts
         loadAccountsSync()
 
-        // Check if already mounted at startup
-        if let active = activeAccount, Self.isPathMounted(active.mountPath) {
-            self.state = .connected
-        } else if Self.isPathMounted(defaultMountPath) {
-            self.state = .connected
+        // Start background sync loop if any account is mounted
+        if connectedCount > 0 {
+            startPeriodicSync()
         }
     }
 
@@ -95,7 +124,6 @@ final class DriveManager: ObservableObject {
     // MARK: - Executable Finder
 
     nonisolated static func findRcloneExecutable() -> String? {
-        // 1. Check bundled binary in all standard bundle locations
         if let auxURL = Bundle.main.url(forAuxiliaryExecutable: "rclone"),
            FileManager.default.isExecutableFile(atPath: auxURL.path) {
             return auxURL.path
@@ -116,7 +144,6 @@ final class DriveManager: ObservableObject {
             return nestedResURL.path
         }
 
-        // 2. Check standard installation directories (development fallback)
         let commonPaths = [
             "/opt/homebrew/bin/rclone",
             "/usr/local/bin/rclone",
@@ -130,7 +157,6 @@ final class DriveManager: ObservableObject {
             }
         }
 
-        // 3. Search via environment PATH
         let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? ""
         for dir in pathEnv.components(separatedBy: ":") where !dir.isEmpty {
             let fullPath = (dir as NSString).appendingPathComponent("rclone")
@@ -142,21 +168,70 @@ final class DriveManager: ObservableObject {
         return nil
     }
 
-    // MARK: - Account Management
+    // MARK: - Account Management (SQLite Backed)
 
     func refreshAccounts() {
         loadAccountsSync()
     }
 
     private func loadAccountsSync() {
-        guard let rclone = Self.findRcloneExecutable() else { return }
+        // 1. Fetch from SQLite Database
+        var dbAccounts = AccountDatabase.shared.getAllAccounts()
 
+        // 2. Discover remotes in rclone.conf (for automatic migration on first launch)
+        let configRemotes = fetchRcloneConfigRemotes()
+
+        for (remoteName, props) in configRemotes {
+            if !dbAccounts.contains(where: { $0.name == remoteName }) {
+                let type = props["type"] as? String ?? "drive"
+                let displayName: String
+                let mountPath: String
+                if remoteName == "gdrive" {
+                    displayName = "Google Drive"
+                    mountPath = defaultMountPath
+                } else {
+                    displayName = remoteName.replacingOccurrences(of: "_", with: " ").capitalized
+                    mountPath = (("~/\(displayName)" as NSString).expandingTildeInPath)
+                }
+
+                let newAcc = RemoteAccount(
+                    name: remoteName,
+                    displayName: displayName,
+                    provider: type,
+                    accountName: displayName,
+                    accountEmail: nil,
+                    mountPath: mountPath,
+                    isConnected: Self.isPathMounted(mountPath),
+                    autoConnect: true,
+                    createdAt: Date()
+                )
+                AccountDatabase.shared.saveAccount(newAcc)
+                dbAccounts.append(newAcc)
+            }
+        }
+
+        // 3. Check mount states for all accounts
+        for i in dbAccounts.indices {
+            let isMounted = Self.isPathMounted(dbAccounts[i].mountPath)
+            dbAccounts[i].isConnected = isMounted
+            accountStates[dbAccounts[i].id] = isMounted ? .connected : .disconnected
+        }
+
+        self.accounts = dbAccounts
+        if activeAccount == nil || !dbAccounts.contains(where: { $0.id == activeAccount?.id }) {
+            self.activeAccount = dbAccounts.first
+        }
+
+        updateOverallState()
+    }
+
+    private func fetchRcloneConfigRemotes() -> [String: [String: Any]] {
+        guard let rclone = Self.findRcloneExecutable() else { return [:] }
         let pipe = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: rclone)
         proc.arguments = ["config", "dump", "--config", configPath]
         proc.standardOutput = pipe
-
         var env = ProcessInfo.processInfo.environment
         let extraPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = extraPaths + ":" + (env["PATH"] ?? "")
@@ -167,46 +242,70 @@ final class DriveManager: ObservableObject {
             proc.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
-                var loaded: [RemoteAccount] = []
-                for (name, props) in json {
-                    let type = props["type"] as? String ?? "drive"
-                    // Determine mount path
-                    let mPath: String
-                    if loaded.isEmpty {
-                        mPath = defaultMountPath
-                    } else {
-                        mPath = (("~/GDrive-\(name)" as NSString).expandingTildeInPath)
-                    }
-                    let isMounted = Self.isPathMounted(mPath)
-                    let account = RemoteAccount(
-                        name: name,
-                        provider: type,
-                        accountName: props["account_name"] as? String,
-                        accountEmail: props["account_email"] as? String,
-                        mountPath: mPath,
-                        isConnected: isMounted
-                    )
-                    loaded.append(account)
-                }
-
-                self.accounts = loaded
-                if activeAccount == nil || !loaded.contains(where: { $0.name == activeAccount?.name }) {
-                    self.activeAccount = loaded.first
-                }
-
-                // If any account is mounted, mark connected
-                if loaded.contains(where: { $0.isConnected }) {
-                    self.state = .connected
-                }
+                return json
             }
-        } catch {
-            print("Failed to load accounts: \(error)")
+        } catch {}
+        return [:]
+    }
+
+    func stateForAccount(_ account: RemoteAccount) -> DriveState {
+        return accountStates[account.id] ?? (account.isConnected ? .connected : .disconnected)
+    }
+
+    func isAccountSyncing(_ account: RemoteAccount) -> Bool {
+        return accountSyncing[account.id] ?? false
+    }
+
+    func formattedLastSync(for account: RemoteAccount) -> String {
+        guard let lastSync = accountLastSync[account.id] else {
+            return "Ready to sync"
+        }
+        let interval = Date().timeIntervalSince(lastSync)
+        if interval < 10 {
+            return "Synced just now"
+        } else if interval < 60 {
+            return "Synced \(Int(interval))s ago"
+        } else {
+            let minutes = Int(interval / 60)
+            return "Synced \(minutes)m ago"
         }
     }
 
-    // MARK: - OAuth Setup Flow (Zero Keys Required)
+    // MARK: - Sanitizer & Port Management
+
+    nonisolated static func sanitizeRemoteName(_ name: String) -> String {
+        let cleaned = name.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-")).inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
+        return cleaned.isEmpty ? "cloud_drive" : cleaned
+    }
+
+    private func allocateRcPort(for accountId: String) -> Int {
+        if let existing = accountRcPorts[accountId] {
+            return existing
+        }
+        var port = 5572
+        let usedPorts = Set(accountRcPorts.values)
+        while usedPorts.contains(port) {
+            port += 1
+        }
+        accountRcPorts[accountId] = port
+        return port
+    }
+
+    // MARK: - Connection Flow (User Names Connection & Folder)
 
     func startGoogleDriveConnection() async -> Bool {
+        return await startConnection(
+            displayName: "Google Drive",
+            mountPath: defaultMountPath,
+            provider: "drive"
+        )
+    }
+
+    func startConnection(displayName: String, mountPath: String, provider: String = "drive") async -> Bool {
         guard let rclone = Self.findRcloneExecutable() else {
             self.authError = "rclone executable was not found."
             return false
@@ -214,18 +313,15 @@ final class DriveManager: ObservableObject {
 
         self.isAuthenticating = true
         self.authError = nil
-        self.authStatusText = "Opening browser for Google authorization..."
+        self.authStatusText = "Opening browser for \(provider.capitalized) authorization..."
 
-        // Generate remote name (gdrive, gdrive2, etc.)
-        let remoteName: String
-        if accounts.contains(where: { $0.name == "gdrive" }) {
-            var idx = 2
-            while accounts.contains(where: { $0.name == "gdrive\(idx)" }) {
-                idx += 1
-            }
-            remoteName = "gdrive\(idx)"
-        } else {
-            remoteName = "gdrive"
+        // Generate sanitized remote name based on user-assigned displayName
+        let baseRemote = Self.sanitizeRemoteName(displayName)
+        var remoteName = baseRemote
+        var counter = 2
+        while accounts.contains(where: { $0.name == remoteName }) {
+            remoteName = "\(baseRemote)_\(counter)"
+            counter += 1
         }
 
         let proc = Process()
@@ -233,7 +329,7 @@ final class DriveManager: ObservableObject {
         proc.arguments = [
             "config", "create",
             remoteName,
-            "drive",
+            provider,
             "scope", "drive",
             "config_shared_client_id", "true",
             "--config", configPath
@@ -277,18 +373,32 @@ final class DriveManager: ObservableObject {
 
         if didRun && exitCode == 0 {
             self.authStatusText = "Authorization successful! Connecting drive..."
-            self.refreshAccounts()
-            if let newlyAdded = self.accounts.first(where: { $0.name == remoteName }) {
-                self.activeAccount = newlyAdded
-            } else if let first = self.accounts.first {
-                self.activeAccount = first
-            }
 
+            let resolvedMountPath = (mountPath as NSString).expandingTildeInPath
+            try? FileManager.default.createDirectory(atPath: resolvedMountPath, withIntermediateDirectories: true)
+
+            let newAccount = RemoteAccount(
+                name: remoteName,
+                displayName: displayName,
+                provider: provider,
+                accountName: displayName,
+                accountEmail: nil,
+                mountPath: resolvedMountPath,
+                isConnected: false,
+                autoConnect: true,
+                createdAt: Date()
+            )
+
+            // Persist into SQLite
+            AccountDatabase.shared.saveAccount(newAccount)
+
+            self.accounts.append(newAccount)
+            self.activeAccount = newAccount
             self.hasCompletedOnboarding = true
             self.isAuthenticating = false
 
-            // Automatically mount the freshly connected drive!
-            self.connect()
+            // Automatically mount the newly created connection immediately alongside others!
+            self.connectAccount(newAccount)
             return true
         } else {
             var errorText = ""
@@ -309,222 +419,68 @@ final class DriveManager: ObservableObject {
         authError = nil
     }
 
-    // MARK: - Delete & Logout Connection
+    // MARK: - Multi-Mount Connect & Disconnect
 
-    func deleteAccount(_ account: RemoteAccount) async {
-        // 1. If currently connected, disconnect first
-        if state.isConnected || state == .connecting {
-            disconnect()
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-        }
-
-        guard let rclone = Self.findRcloneExecutable() else { return }
-
-        await Task.detached { [configPath] in
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: rclone)
-            proc.arguments = ["config", "delete", account.name, "--config", configPath]
-            proc.standardOutput = FileHandle.nullDevice
-            proc.standardError = FileHandle.nullDevice
-
-            var env = ProcessInfo.processInfo.environment
-            let extraPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-            env["PATH"] = extraPaths + ":" + (env["PATH"] ?? "")
-            proc.environment = env
-
-            try? proc.run()
-            proc.waitUntilExit()
-        }.value
-
-        refreshAccounts()
-
-        if accounts.isEmpty {
-            hasCompletedOnboarding = false
-            activeAccount = nil
-            state = .disconnected
-        }
-    }
-
-    func logoutAccount(_ account: RemoteAccount) async {
-        if state.isConnected || state == .connecting {
-            disconnect()
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-        }
-
-        guard let rclone = Self.findRcloneExecutable() else { return }
-
-        await Task.detached { [configPath] in
-            // Revoke oauth token
-            let procDisconnect = Process()
-            procDisconnect.executableURL = URL(fileURLWithPath: rclone)
-            procDisconnect.arguments = ["config", "disconnect", "\(account.name):", "--config", configPath]
-            procDisconnect.standardOutput = FileHandle.nullDevice
-            procDisconnect.standardError = FileHandle.nullDevice
-
-            var env = ProcessInfo.processInfo.environment
-            let extraPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-            env["PATH"] = extraPaths + ":" + (env["PATH"] ?? "")
-            procDisconnect.environment = env
-
-            try? procDisconnect.run()
-            procDisconnect.waitUntilExit()
-
-            // Delete remote
-            let procDelete = Process()
-            procDelete.executableURL = URL(fileURLWithPath: rclone)
-            procDelete.arguments = ["config", "delete", account.name, "--config", configPath]
-            procDelete.standardOutput = FileHandle.nullDevice
-            procDelete.standardError = FileHandle.nullDevice
-            procDelete.environment = env
-            try? procDelete.run()
-            procDelete.waitUntilExit()
-        }.value
-
-        refreshAccounts()
-
-        if accounts.isEmpty {
-            hasCompletedOnboarding = false
-            activeAccount = nil
-            state = .disconnected
-        }
-    }
-
-    // MARK: - Mount Checks & Control
-
-    nonisolated static func isPathMounted(_ targetPath: String) -> Bool {
-        let standardized = URL(fileURLWithPath: targetPath).standardized.path
-
-        // Check 1: statfs
-        var stat = statfs()
-        if statfs(standardized, &stat) == 0 {
-            let mountedPath = withUnsafePointer(to: &stat.f_mntonname) {
-                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
-                    String(cString: $0)
-                }
-            }
-            if mountedPath == standardized {
-                return true
-            }
-        }
-
-        // Check 2: /sbin/mount output
-        let pipe = Pipe()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/sbin/mount")
-        process.standardOutput = pipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                return output.contains(" on \(standardized) (")
-            }
-        } catch {
-            return false
-        }
-
-        return false
-    }
-
-    nonisolated static func forceUnmount(path: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/sbin/umount")
-        process.arguments = ["-f", path]
-        try? process.run()
-        process.waitUntilExit()
-    }
-
-    nonisolated static func unmount(path: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/sbin/umount")
-        process.arguments = [path]
-        try? process.run()
-        process.waitUntilExit()
-
-        if isPathMounted(path) {
-            forceUnmount(path: path)
-        }
-    }
-
-    // MARK: - Connect & Disconnect
-
-    var activeMountPath: String {
-        activeAccount?.mountPath ?? defaultMountPath
-    }
-
-    var activeRemoteName: String {
-        activeAccount?.name ?? "gdrive"
-    }
-
-    func toggleConnection() {
-        if state.isConnected {
-            disconnect()
-        } else {
-            connect()
-        }
-    }
-
-    func connect() {
-        guard state == .disconnected || state.isError else {
-            return
-        }
-
-        state = .connecting
-        errorMessage = nil
-        isUserInitiatedDisconnect = false
-
+    func connectAccount(_ account: RemoteAccount) {
         guard let rcloneExecutable = Self.findRcloneExecutable() else {
-            let err = "rclone executable was not found."
-            state = .error(err)
-            errorMessage = err
+            accountStates[account.id] = .error("rclone executable not found")
+            updateOverallState()
             return
         }
 
-        let mountPath = self.activeMountPath
-        let remoteName = self.activeRemoteName
-
-        // Ensure target directories exist
-        let logDir = (logFile as NSString).deletingLastPathComponent
-        do {
-            try FileManager.default.createDirectory(atPath: mountPath, withIntermediateDirectories: true)
-            try FileManager.default.createDirectory(atPath: cacheDir, withIntermediateDirectories: true)
-            try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
-        } catch {
-            let err = "Failed to create directories: \(error.localizedDescription)"
-            state = .error(err)
-            errorMessage = err
+        if Self.isPathMounted(account.mountPath) {
+            accountStates[account.id] = .connected
+            updateAccountConnection(id: account.id, isConnected: true)
+            updateOverallState()
             return
         }
 
-        // Clean up any stale mount at the destination before starting
-        if Self.isPathMounted(mountPath) {
-            Self.forceUnmount(path: mountPath)
-        }
+        accountStates[account.id] = .connecting
+        updateOverallState()
+
+        let mountPath = account.mountPath
+        try? FileManager.default.createDirectory(atPath: mountPath, withIntermediateDirectories: true)
+
+        let accountCache = (cacheDir as NSString).appendingPathComponent(account.name)
+        try? FileManager.default.createDirectory(atPath: accountCache, withIntermediateDirectories: true)
+
+        let accountLog = ((logFile as NSString).deletingLastPathComponent as NSString).appendingPathComponent("rclone-\(account.name).log")
+
+        let rcPort = allocateRcPort(for: account.id)
 
         let arguments = [
             "nfsmount",
-            "\(remoteName):",
+            "\(account.name):",
             mountPath,
             "--config", configPath,
-            "--volname", "Google Drive",
+            "--volname", account.displayName,
             "--vfs-cache-mode", "full",
-            "--cache-dir", cacheDir,
+            "--cache-dir", accountCache,
             "--vfs-cache-max-size", "20G",
             "--vfs-cache-max-age", "24h",
-            "--vfs-read-ahead", "256M",
-            "--vfs-write-back", "5s",
-            "--dir-cache-time", "5m",
-            "--poll-interval", "30s",
-            "--buffer-size", "64M",
-            "--drive-chunk-size", "64M",
+            "--vfs-read-ahead", "128M",
+            "--vfs-write-back", "2s",
+            "--vfs-fast-fingerprint",
+            "--vfs-refresh",
+            "--dir-cache-time", "15s",
+            "--poll-interval", "5s",
+            "--attr-timeout", "1s",
+            "--buffer-size", "32M",
+            "--drive-chunk-size", "32M",
             "--drive-export-formats", "webloc",
-            "--nfs-cache-type", "disk",
+            "--drive-pacer-min-sleep", "10ms",
+            "--drive-pacer-burst", "200",
+            "--tpslimit", "10",
+            "--tpslimit-burst", "20",
+            "--noapplexattr",
+            "--noappledouble",
+            "--nfs-cache-type", "memory",
+            "--nfs-cache-handle-limit", "1000000",
             "--rc",
-            "--rc-addr", "127.0.0.1:5572",
+            "--rc-addr", "127.0.0.1:\(rcPort)",
             "--rc-user", "app",
             "--rc-pass", "secret123",
-            "--log-file", logFile,
+            "--log-file", accountLog,
             "--log-level", "INFO"
         ]
 
@@ -541,121 +497,315 @@ final class DriveManager: ObservableObject {
         }
         process.environment = environment
 
+        let accountId = account.id
+
         process.terminationHandler = { [weak self] proc in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                if self.isUserInitiatedDisconnect {
-                    self.state = .disconnected
-                    self.isUserInitiatedDisconnect = false
-                } else if self.state == .connected || self.state == .connecting {
+                self.runningProcesses.removeValue(forKey: accountId)
+                self.accountRcPorts.removeValue(forKey: accountId)
+                if self.userInitiatedDisconnects.contains(accountId) {
+                    self.accountStates[accountId] = .disconnected
+                    self.userInitiatedDisconnects.remove(accountId)
+                } else {
                     let code = proc.terminationStatus
-                    let err = "rclone exited unexpectedly with code \(code)"
-                    self.state = .error(err)
-                    self.errorMessage = err
+                    let err = "Exited unexpectedly with code \(code)"
+                    self.accountStates[accountId] = .error(err)
                 }
-                self.currentProcess = nil
-                self.updateAccountsMountStatus()
+                self.updateAccountConnection(id: accountId, isConnected: false)
+                self.updateOverallState()
             }
         }
 
         do {
             try process.run()
-            self.currentProcess = process
+            runningProcesses[account.id] = process
         } catch {
-            let err = "Failed to launch rclone process: \(error.localizedDescription)"
-            self.state = .error(err)
-            errorMessage = err
+            let err = "Failed to launch process: \(error.localizedDescription)"
+            accountStates[account.id] = .error(err)
+            updateOverallState()
             return
         }
 
-        // Poll for mount readiness
+        // Readiness poll
         Task {
             let startTime = Date()
             var isMounted = false
 
             while Date().timeIntervalSince(startTime) < 15.0 {
-                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s check interval
+                try? await Task.sleep(nanoseconds: 500_000_000)
                 if Self.isPathMounted(mountPath) {
                     isMounted = true
                     break
                 }
-                if self.currentProcess?.isRunning == false {
+                if process.isRunning == false {
                     break
                 }
             }
 
-            if isMounted && self.currentProcess?.isRunning == true {
-                self.state = .connected
-                self.errorMessage = nil
-                self.updateAccountsMountStatus()
-            } else if self.state == .connecting {
-                let err = "Mount timed out or rclone failed to mount."
-                self.state = .error(err)
-                self.errorMessage = err
-                self.disconnect()
+            if isMounted && process.isRunning {
+                self.accountStates[accountId] = .connected
+                self.updateAccountConnection(id: accountId, isConnected: true)
+                self.updateOverallState()
+                self.startPeriodicSync()
+                self.syncAccount(account)
+            } else {
+                let err = "Mount timed out or failed to mount."
+                self.accountStates[accountId] = .error(err)
+                self.updateOverallState()
+                self.disconnectAccount(account)
             }
+        }
+    }
+
+    func disconnectAccount(_ account: RemoteAccount) {
+        let accountId = account.id
+        userInitiatedDisconnects.insert(accountId)
+        accountStates[accountId] = .disconnecting
+        updateOverallState()
+
+        let proc = runningProcesses.removeValue(forKey: accountId)
+        accountRcPorts.removeValue(forKey: accountId)
+        let mountLocation = account.mountPath
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            // 1. Unmount volume FIRST while rclone is still alive
+            Self.unmountVolume(path: mountLocation)
+
+            // 2. Terminate rclone process
+            if let proc = proc, proc.isRunning {
+                proc.terminate()
+                var wait = 0
+                while proc.isRunning && wait < 15 {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    wait += 1
+                }
+                if proc.isRunning {
+                    proc.interrupt()
+                }
+            }
+
+            // 3. Clean up any stray rclone nfsmount on this path
+            let pkill = Process()
+            pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            pkill.arguments = ["-f", "rclone nfsmount.*\(mountLocation)"]
+            pkill.standardOutput = FileHandle.nullDevice
+            pkill.standardError = FileHandle.nullDevice
+            try? pkill.run()
+            pkill.waitUntilExit()
+
+            await MainActor.run { [weak self] in
+                guard let self = self else { return }
+                self.accountStates[accountId] = .disconnected
+                self.userInitiatedDisconnects.remove(accountId)
+                self.updateAccountConnection(id: accountId, isConnected: false)
+                self.updateOverallState()
+            }
+        }
+    }
+
+    func toggleAccountConnection(_ account: RemoteAccount) {
+        let current = stateForAccount(account)
+        if current.isConnected || current == .connecting {
+            disconnectAccount(account)
+        } else {
+            connectAccount(account)
+        }
+    }
+
+    private func updateAccountConnection(id: String, isConnected: Bool) {
+        if let idx = accounts.firstIndex(where: { $0.id == id }) {
+            accounts[idx].isConnected = isConnected
+        }
+        AccountDatabase.shared.updateConnectionStatus(id: id, isConnected: isConnected)
+    }
+
+    func updateOverallState() {
+        let hasConnecting = accountStates.values.contains(.connecting)
+        let hasConnected = accountStates.values.contains(.connected)
+        let hasError = accountStates.values.contains { state in
+            if case .error = state { return true }
+            return false
+        }
+
+        if hasConnecting {
+            self.state = .connecting
+        } else if hasConnected {
+            self.state = .connected
+        } else if hasError {
+            self.state = .error("One or more drives encountered an issue")
+        } else {
+            self.state = .disconnected
+        }
+    }
+
+    // MARK: - Global Connect / Disconnect (Backwards Compatibility)
+
+    var activeMountPath: String {
+        activeAccount?.mountPath ?? defaultMountPath
+    }
+
+    func toggleConnection() {
+        if state.isConnected {
+            disconnect()
+        } else {
+            connect()
+        }
+    }
+
+    func connect() {
+        if let active = activeAccount {
+            connectAccount(active)
+        } else if let first = accounts.first {
+            connectAccount(first)
         }
     }
 
     func disconnect() {
-        guard state != .disconnected && state != .disconnecting else {
-            return
+        for account in accounts where stateForAccount(account).isConnected {
+            disconnectAccount(account)
         }
+    }
 
-        state = .disconnecting
-        isUserInitiatedDisconnect = true
-
-        let proc = self.currentProcess
-        let mountLocation = self.activeMountPath
-
-        Task {
-            if let proc = proc, proc.isRunning {
+    func disconnectSync() {
+        for account in accounts {
+            Self.unmountVolume(path: account.mountPath)
+            if let proc = runningProcesses[account.id], proc.isRunning {
                 proc.terminate()
             }
+        }
+        runningProcesses.removeAll()
+    }
 
-            Self.unmount(path: mountLocation)
+    // MARK: - Delete & Logout Connection
 
-            var waitTime = 0.0
-            while (proc?.isRunning == true) && waitTime < 3.0 {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                waitTime += 0.2
-            }
+    func deleteAccount(_ account: RemoteAccount) async {
+        disconnectAccount(account)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
 
-            if proc?.isRunning == true {
-                proc?.interrupt()
-            }
+        // Remove from rclone config
+        if let rclone = Self.findRcloneExecutable() {
+            await Task.detached { [configPath] in
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: rclone)
+                proc.arguments = ["config", "delete", account.name, "--config", configPath]
+                proc.standardOutput = FileHandle.nullDevice
+                proc.standardError = FileHandle.nullDevice
+                try? proc.run()
+                proc.waitUntilExit()
+            }.value
+        }
 
-            if Self.isPathMounted(mountLocation) {
-                Self.forceUnmount(path: mountLocation)
-            }
+        // Remove from SQLite Database
+        AccountDatabase.shared.deleteAccount(id: account.id)
 
-            self.currentProcess = nil
-            self.state = .disconnected
-            self.isUserInitiatedDisconnect = false
-            self.updateAccountsMountStatus()
+        // Remove from memory
+        accounts.removeAll { $0.id == account.id }
+        accountStates.removeValue(forKey: account.id)
+        accountRcPorts.removeValue(forKey: account.id)
+
+        if activeAccount?.id == account.id {
+            activeAccount = accounts.first
+        }
+        updateOverallState()
+
+        if accounts.isEmpty {
+            hasCompletedOnboarding = false
+            state = .disconnected
         }
     }
 
-    private func updateAccountsMountStatus() {
-        for idx in accounts.indices {
-            accounts[idx].isConnected = Self.isPathMounted(accounts[idx].mountPath)
+    func logoutAccount(_ account: RemoteAccount) async {
+        disconnectAccount(account)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+        guard let rclone = Self.findRcloneExecutable() else { return }
+
+        await Task.detached { [configPath] in
+            let procDisconnect = Process()
+            procDisconnect.executableURL = URL(fileURLWithPath: rclone)
+            procDisconnect.arguments = ["config", "disconnect", "\(account.name):", "--config", configPath]
+            procDisconnect.standardOutput = FileHandle.nullDevice
+            procDisconnect.standardError = FileHandle.nullDevice
+            try? procDisconnect.run()
+            procDisconnect.waitUntilExit()
+
+            let procDelete = Process()
+            procDelete.executableURL = URL(fileURLWithPath: rclone)
+            procDelete.arguments = ["config", "delete", account.name, "--config", configPath]
+            procDelete.standardOutput = FileHandle.nullDevice
+            procDelete.standardError = FileHandle.nullDevice
+            try? procDelete.run()
+            procDelete.waitUntilExit()
+        }.value
+
+        AccountDatabase.shared.deleteAccount(id: account.id)
+        accounts.removeAll { $0.id == account.id }
+        accountStates.removeValue(forKey: account.id)
+        accountRcPorts.removeValue(forKey: account.id)
+
+        if activeAccount?.id == account.id {
+            activeAccount = accounts.first
+        }
+        updateOverallState()
+
+        if accounts.isEmpty {
+            hasCompletedOnboarding = false
+            state = .disconnected
         }
     }
 
-    // Synchronous unmount used when quitting the application
-    nonisolated func disconnectSync() {
-        let standardizedMount = URL(fileURLWithPath: (("~/GDrive" as NSString).expandingTildeInPath)).standardized.path
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/sbin/umount")
-        p.arguments = ["-f", standardizedMount]
-        try? p.run()
-        p.waitUntilExit()
+    // MARK: - Mount Checks & Control
 
-        let killProc = Process()
-        killProc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        killProc.arguments = ["-9", "-f", "rclone nfsmount"]
-        try? killProc.run()
-        killProc.waitUntilExit()
+    nonisolated static func isPathMounted(_ targetPath: String) -> Bool {
+        let standardized = URL(fileURLWithPath: targetPath).standardized.path
+
+        var mntbuf: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo(&mntbuf, MNT_NOWAIT)
+        if count > 0, let buf = mntbuf {
+            for i in 0..<Int(count) {
+                var stat = buf[i]
+                let mountedPath = withUnsafePointer(to: &stat.f_mntonname) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                        String(cString: $0)
+                    }
+                }
+                if mountedPath == standardized {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    nonisolated static func unmountVolume(path: String) {
+        let standardized = URL(fileURLWithPath: path).standardized.path
+
+        let p1 = Process()
+        p1.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        p1.arguments = ["unmount", "force", standardized]
+        p1.standardOutput = FileHandle.nullDevice
+        p1.standardError = FileHandle.nullDevice
+        try? p1.run()
+        p1.waitUntilExit()
+
+        if isPathMounted(standardized) {
+            let p2 = Process()
+            p2.executableURL = URL(fileURLWithPath: "/sbin/umount")
+            p2.arguments = ["-f", standardized]
+            p2.standardOutput = FileHandle.nullDevice
+            p2.standardError = FileHandle.nullDevice
+            try? p2.run()
+            p2.waitUntilExit()
+        }
+    }
+
+    nonisolated static func forceUnmount(path: String) {
+        unmountVolume(path: path)
+    }
+
+    nonisolated static func unmount(path: String) {
+        unmountVolume(path: path)
     }
 
     // MARK: - Launch at Login
@@ -679,7 +829,17 @@ final class DriveManager: ObservableObject {
     // MARK: - Shortcuts
 
     func openInFinder() {
-        let url = URL(fileURLWithPath: activeMountPath)
+        if let active = activeAccount {
+            openAccountInFinder(active)
+        } else {
+            let url = URL(fileURLWithPath: activeMountPath)
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func openAccountInFinder(_ account: RemoteAccount) {
+        syncAccount(account)
+        let url = URL(fileURLWithPath: account.mountPath)
         NSWorkspace.shared.open(url)
     }
 
@@ -694,10 +854,112 @@ final class DriveManager: ObservableObject {
     }
 
     func clearCache() {
-        if state.isConnected {
-            disconnect()
-        }
+        disconnect()
         try? FileManager.default.removeItem(atPath: cacheDir)
         try? FileManager.default.createDirectory(atPath: cacheDir, withIntermediateDirectories: true)
+    }
+
+    // MARK: - Two-Way Synchronization
+
+    func startPeriodicSync() {
+        stopPeriodicSync()
+        syncTask = Task.detached(priority: .utility) { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
+                guard !Task.isCancelled else { break }
+                guard let self = self else { break }
+
+                let mounted = await MainActor.run {
+                    self.accounts.filter { self.stateForAccount($0) == .connected }
+                }
+
+                for acc in mounted {
+                    await self.syncAccountAsync(acc, forceRefresh: false)
+                }
+            }
+        }
+    }
+
+    func stopPeriodicSync() {
+        syncTask?.cancel()
+        syncTask = nil
+    }
+
+    func syncNow() {
+        for account in accounts where stateForAccount(account) == .connected {
+            syncAccount(account, forceRefresh: true)
+        }
+    }
+
+    func syncAccount(_ account: RemoteAccount, forceRefresh: Bool = true) {
+        Task {
+            await syncAccountAsync(account, forceRefresh: forceRefresh)
+        }
+    }
+
+    private func syncAccountAsync(_ account: RemoteAccount, forceRefresh: Bool = false) async {
+        let accountId = account.id
+        guard stateForAccount(account) == .connected else { return }
+
+        await MainActor.run {
+            self.accountSyncing[accountId] = true
+            self.isSyncing = true
+        }
+
+        // Only invoke rclone RC vfs/refresh if requested AND if the rclone process is actively running
+        if forceRefresh,
+           let proc = runningProcesses[accountId], proc.isRunning,
+           let port = accountRcPorts[accountId],
+           let url = URL(string: "http://127.0.0.1:\(port)/vfs/refresh") {
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            // Pass _async: true so rclone immediately queues the refresh in the background and returns HTTP 200 in <1ms without blocking or timing out
+            request.httpBody = "{\"_async\":true}".data(using: .utf8)
+            let authString = "app:secret123"
+            if let authData = authString.data(using: .utf8) {
+                request.setValue("Basic \(authData.base64EncodedString())", forHTTPHeaderField: "Authorization")
+            }
+
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 2
+            config.timeoutIntervalForResource = 2
+            config.waitsForConnectivity = false
+            let session = URLSession(configuration: config)
+
+            _ = try? await session.data(for: request)
+        }
+
+        Self.notifyFinder(path: account.mountPath)
+
+        await MainActor.run {
+            self.accountSyncing[accountId] = false
+            self.accountLastSync[accountId] = Date()
+            self.lastSyncTime = Date()
+            self.isSyncing = self.accountSyncing.values.contains(true)
+        }
+    }
+
+    nonisolated static func notifyFinder(path: String) {
+        let script = """
+        tell application "Finder"
+            try
+                update item (POSIX file "\(path)")
+                repeat with w in (get windows)
+                    try
+                        set targetPath to POSIX path of (target of w as alias)
+                        if targetPath starts with "\(path)" then
+                            update target of w
+                        end if
+                    end try
+                end repeat
+            end try
+        end tell
+        """
+        DispatchQueue.global(qos: .utility).async {
+            let appleScript = NSAppleScript(source: script)
+            appleScript?.executeAndReturnError(nil)
+        }
     }
 }

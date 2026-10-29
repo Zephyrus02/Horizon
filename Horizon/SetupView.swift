@@ -19,12 +19,16 @@ struct SetupView: View {
     }
 
     @State private var currentStep: SetupStep = .welcome
+    @State private var connectionName: String = "Google Drive"
+    @State private var mountPath: String = ("~/Google Drive" as NSString).expandingTildeInPath
+    @State private var isCustomMount: Bool = false
+    @State private var selectedProvider: String = "drive"
+    @State private var isConnecting: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
             // Top Window Bar with step dots & close button
             HStack {
-                // Step Indicator Pills
                 HStack(spacing: 6) {
                     ForEach(SetupStep.allCases, id: \.self) { step in
                         Capsule()
@@ -54,7 +58,6 @@ struct SetupView: View {
 
             Divider()
 
-            // Main Content Area
             Group {
                 switch currentStep {
                 case .welcome:
@@ -67,7 +70,7 @@ struct SetupView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 640, height: 480)
+        .frame(width: 640, height: 490)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -77,7 +80,6 @@ struct SetupView: View {
         VStack(spacing: 20) {
             Spacer()
 
-            // App Icon with smooth gradient border
             ZStack {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .fill(Color(nsColor: .controlBackgroundColor))
@@ -107,14 +109,13 @@ struct SetupView: View {
                 Text("Welcome to Horizon")
                     .font(.system(size: 26, weight: .bold))
 
-                Text("Stream your cloud storage directly in Finder with zero disk overhead.")
+                Text("Mount cloud storage directly into Finder with native two-way sync and SQLite metadata.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 420)
             }
 
-            // Feature Highlights
             VStack(alignment: .leading, spacing: 12) {
                 FeatureRow(
                     icon: "folder.badge.gearshape",
@@ -124,17 +125,17 @@ struct SetupView: View {
                 )
 
                 FeatureRow(
-                    icon: "bolt.fill",
-                    iconColor: .orange,
-                    title: "On-Demand Streaming",
-                    subtitle: "Intelligently caches what you access without occupying your local SSD."
+                    icon: "externaldrive.connected.to.line.below",
+                    iconColor: .purple,
+                    title: "Multi-Account Concurrent Mounts",
+                    subtitle: "Mount personal and work cloud drives side by side simultaneously."
                 )
 
                 FeatureRow(
-                    icon: "lock.shield.fill",
-                    iconColor: .green,
-                    title: "Direct & Zero-Config",
-                    subtitle: "Log in with your Google account in your browser. No API keys needed."
+                    icon: "arrow.triangle.2.circlepath",
+                    iconColor: .orange,
+                    title: "Instant Two-Way Synchronization",
+                    subtitle: "Cloud edits appear locally within seconds, and Finder changes push instantly."
                 )
             }
             .padding(.horizontal, 24)
@@ -147,7 +148,6 @@ struct SetupView: View {
 
             Spacer()
 
-            // Continue Button
             HStack {
                 Spacer()
                 Button {
@@ -176,172 +176,92 @@ struct SetupView: View {
     // MARK: - Step 2: Connect Storage View
 
     private var connectView: some View {
-        VStack(spacing: 20) {
-            Spacer(minLength: 16)
+        VStack(spacing: 16) {
+            Spacer(minLength: 12)
 
-            VStack(spacing: 6) {
-                Text("Connect Your Storage")
-                    .font(.system(size: 24, weight: .bold))
+            VStack(spacing: 4) {
+                Text("Configure Cloud Connection")
+                    .font(.system(size: 22, weight: .bold))
 
-                Text("Choose a cloud provider to mount as a local drive on your Mac.")
-                    .font(.system(size: 14))
+                Text("Assign your custom connection name and local mount folder.")
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
             }
 
-            VStack(spacing: 12) {
-                // Google Drive Row (Primary)
-                HStack(spacing: 14) {
-                    GoogleDriveLogoView(size: 32)
-                        .frame(width: 38, height: 38)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor))
-                        )
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Google Drive")
-                            .font(.system(size: 15, weight: .semibold))
-
-                        Text("Stream your personal or Google Workspace files")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    if driveManager.isAuthenticating {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Waiting for login...")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-
-                            Button("Cancel") {
-                                driveManager.cancelAuthentication()
-                            }
-                            .controlSize(.small)
-                        }
-                    } else if driveManager.state.isConnected || driveManager.hasConfiguredAccounts {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                            Text("Connected")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.green)
-                        }
-                    } else {
-                        Button {
-                            Task {
-                                let success = await driveManager.startGoogleDriveConnection()
-                                if success {
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-                                        currentStep = .complete
-                                    }
-                                }
-                            }
-                        } label: {
-                            Text("Connect")
-                                .fontWeight(.semibold)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 4)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.regular)
-                    }
+            VStack(spacing: 14) {
+                // Provider Selection
+                HStack(spacing: 12) {
+                    providerButton(id: "drive", title: "Google Drive")
+                    providerButton(id: "onedrive", title: "OneDrive")
+                    providerButton(id: "dropbox", title: "Dropbox")
                 }
-                .padding(14)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
-                        )
-                )
 
-                // Microsoft OneDrive (Coming Soon)
-                HStack(spacing: 14) {
-                    Image(systemName: "cloud.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.blue.opacity(0.5))
-                        .frame(width: 38, height: 38)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-                        )
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Microsoft OneDrive")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
-
-                        Text("Personal, School, or Business accounts")
-                            .font(.caption)
-                            .foregroundStyle(.secondary.opacity(0.7))
-                    }
-
-                    Spacer()
-
-                    Text("Coming Soon")
-                        .font(.system(size: 11, weight: .semibold))
+                // Connection Name Field
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Connection Name")
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(
-                            Capsule()
-                                .fill(Color.secondary.opacity(0.12))
-                        )
+
+                    TextField("e.g. Work Drive, Personal Google Drive", text: $connectionName)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: connectionName) { newName in
+                            if !isCustomMount {
+                                let clean = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                mountPath = clean.isEmpty ? ("~/CloudDrive" as NSString).expandingTildeInPath : (("~/\(clean)" as NSString).expandingTildeInPath)
+                            }
+                        }
                 }
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.4))
-                )
 
-                // Dropbox (Coming Soon)
-                HStack(spacing: 14) {
-                    Image(systemName: "shippingbox.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.blue.opacity(0.5))
-                        .frame(width: 38, height: 38)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-                        )
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Dropbox")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
-
-                        Text("Sync Dropbox storage into local Finder")
-                            .font(.caption)
-                            .foregroundStyle(.secondary.opacity(0.7))
-                    }
-
-                    Spacer()
-
-                    Text("Coming Soon")
-                        .font(.system(size: 11, weight: .semibold))
+                // Mount Location Field
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Local Mount Folder")
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(
-                            Capsule()
-                                .fill(Color.secondary.opacity(0.12))
-                        )
+
+                    HStack(spacing: 8) {
+                        TextField("Folder path", text: $mountPath)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                            .onChange(of: mountPath) { _ in
+                                isCustomMount = true
+                            }
+
+                        Button("Browse...") {
+                            chooseFolder()
+                        }
+                        .controlSize(.small)
+                    }
                 }
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.4))
-                )
             }
+            .padding(18)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
             .padding(.horizontal, 48)
 
-            // Authentication status / error callout
-            if let error = driveManager.authError {
+            // Auth in progress or error
+            if driveManager.isAuthenticating {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Opening browser for authorization... Please sign in.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel") {
+                        driveManager.cancelAuthentication()
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.1))
+                )
+                .padding(.horizontal, 48)
+            } else if let error = driveManager.authError {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
@@ -357,21 +277,6 @@ struct SetupView: View {
                         .fill(Color.red.opacity(0.1))
                 )
                 .padding(.horizontal, 48)
-            } else if driveManager.isAuthenticating {
-                HStack(spacing: 8) {
-                    Image(systemName: "safari")
-                        .foregroundStyle(Color.accentColor)
-                    Text("Check your web browser to approve Google Drive access.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 48)
-            } else {
-                Text("Clicking Connect will open your browser to log in with your Google account. No API keys required.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 56)
             }
 
             Spacer()
@@ -388,17 +293,92 @@ struct SetupView: View {
                 Spacer()
 
                 if driveManager.hasConfiguredAccounts {
-                    Button("Next") {
+                    Button("Skip to Finish") {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                             currentStep = .complete
                         }
                     }
-                    .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                 }
+
+                Button {
+                    let name = connectionName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty else { return }
+                    isConnecting = true
+                    Task {
+                        let success = await driveManager.startConnection(
+                            displayName: name,
+                            mountPath: mountPath,
+                            provider: selectedProvider
+                        )
+                        isConnecting = false
+                        if success {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                                currentStep = .complete
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(driveManager.isAuthenticating ? "Authenticating..." : "Connect Drive")
+                            .fontWeight(.semibold)
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(connectionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || driveManager.isAuthenticating || isConnecting)
             }
             .padding(.horizontal, 36)
             .padding(.bottom, 24)
+        }
+    }
+
+    private func providerButton(id: String, title: String) -> some View {
+        Button {
+            selectedProvider = id
+            if !isCustomMount {
+                switch id {
+                case "onedrive": connectionName = "OneDrive"
+                case "dropbox": connectionName = "Dropbox"
+                default: connectionName = "Google Drive"
+                }
+                mountPath = (("~/\(connectionName)" as NSString).expandingTildeInPath)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                ProviderLogoView(provider: id, size: 20)
+                Text(title)
+                    .font(.system(size: 12, weight: selectedProvider == id ? .semibold : .regular))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(selectedProvider == id ? Color.accentColor.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(selectedProvider == id ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Select Mount Folder"
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                self.mountPath = url.path
+                self.isCustomMount = true
+            }
         }
     }
 
@@ -408,7 +388,6 @@ struct SetupView: View {
         VStack(spacing: 20) {
             Spacer()
 
-            // Big checkmark
             ZStack {
                 Circle()
                     .fill(Color.green.opacity(0.12))
@@ -420,11 +399,11 @@ struct SetupView: View {
             }
 
             VStack(spacing: 8) {
-                Text("You're All Set!")
+                Text("Setup Complete!")
                     .font(.system(size: 26, weight: .bold))
 
-                let targetMount = driveManager.activeMountPath
-                Text("Your Google Drive is mounted at \(targetMount) and Horizon is now running in your menu bar.")
+                let count = driveManager.accounts.count
+                Text(count > 1 ? "\(count) cloud connections are configured and ready in Horizon." : "Your drive is mounted and ready in Finder.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -449,7 +428,7 @@ struct SetupView: View {
                     windowManager.closeWindow()
                 } label: {
                     HStack(spacing: 6) {
-                        Text("Finish & Start Horizon")
+                        Text("Start Horizon")
                             .fontWeight(.semibold)
                     }
                     .padding(.horizontal, 20)
@@ -457,36 +436,30 @@ struct SetupView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .keyboardShortcut(.defaultAction)
             }
-            .padding(.top, 12)
 
             Spacer()
         }
-        .padding(.horizontal, 36)
-        .padding(.bottom, 24)
     }
 }
 
-// MARK: - Feature Row Component
-
-struct FeatureRow: View {
+private struct FeatureRow: View {
     let icon: String
     let iconColor: Color
     let title: String
     let subtitle: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(spacing: 14) {
             Image(systemName: icon)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 18))
                 .foregroundStyle(iconColor)
-                .frame(width: 24, height: 24)
-                .padding(.top, 2)
+                .frame(width: 24)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
+
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)

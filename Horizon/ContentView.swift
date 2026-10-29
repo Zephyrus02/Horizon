@@ -10,6 +10,7 @@ import Combine
 
 struct ContentView: View {
     @ObservedObject var driveManager: DriveManager
+    @State private var showAddAccountSheet = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -41,7 +42,7 @@ struct ContentView: View {
                         .fill(driveManager.state.statusColor)
                         .frame(width: 7, height: 7)
 
-                    Text(driveManager.state.statusTitle)
+                    Text(statusSummaryText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -55,19 +56,19 @@ struct ContentView: View {
 
             Divider()
 
-            // Main Account Card or Empty State
+            // Accounts List (all connections shown simultaneously)
             if driveManager.accounts.isEmpty {
-                VStack(spacing: 10) {
+                VStack(spacing: 12) {
                     Text("No Accounts Connected")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
 
                     Button {
-                        WindowManager.shared.showSetup()
+                        showAddAccountSheet = true
                     } label: {
                         HStack(spacing: 6) {
-                            GoogleDriveLogoView(size: 16)
-                            Text("Set Up Google Drive")
+                            Image(systemName: "plus.circle.fill")
+                            Text("Connect Cloud Drive")
                                 .fontWeight(.semibold)
                         }
                         .frame(maxWidth: .infinity)
@@ -76,65 +77,29 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.regular)
                 }
-                .padding(12)
+                .padding(14)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(Color(nsColor: .controlBackgroundColor))
                 )
-            } else {
-                VStack(spacing: 10) {
-                    HStack(alignment: .center, spacing: 10) {
-                        GoogleDriveLogoView(size: 22)
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(driveManager.activeAccount?.displayTitle ?? "Google Drive")
-                                .font(.system(size: 13, weight: .medium))
-                                .lineLimit(1)
-
-                            Text(driveManager.activeMountPath)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Spacer()
-
-                        Toggle(isOn: Binding(
-                            get: {
-                                driveManager.state.isConnected || driveManager.state == .connecting
-                            },
-                            set: { shouldConnect in
-                                if shouldConnect {
-                                    driveManager.connect()
-                                } else {
-                                    driveManager.disconnect()
-                                }
-                            }
-                        )) {
-                            Text("Connect")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .toggleStyle(.switch)
-                        .disabled(driveManager.state.isTransitioning)
-                    }
-
-                    // Transitioning indicator
-                    if driveManager.state.isTransitioning {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text(driveManager.state == .connecting ? "Mounting Google Drive..." : "Unmounting...")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                        }
-                        .padding(.top, 2)
+            } else if driveManager.accounts.count <= 3 {
+                // When 1-3 accounts, use direct VStack so MenuBarExtra calculates intrinsic fittingSize correctly without collapsing
+                VStack(spacing: 8) {
+                    ForEach(driveManager.accounts) { account in
+                        accountCard(for: account)
                     }
                 }
-                .padding(10)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
+            } else {
+                // When more than 3 accounts, provide a fixed explicit height so ScrollView does not collapse to 0 in AppKit popover
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(spacing: 8) {
+                        ForEach(driveManager.accounts) { account in
+                            accountCard(for: account)
+                        }
+                    }
+                    .padding(.trailing, 2)
+                }
+                .frame(height: 250)
             }
 
             // Error Notice (if any)
@@ -168,18 +133,28 @@ struct ContentView: View {
                 )
             }
 
-            // Quick Actions (when connected)
-            if driveManager.state.isConnected {
-                Button(action: {
-                    driveManager.openInFinder()
-                }) {
-                    HStack {
-                        Image(systemName: "folder")
-                        Text("Open in Finder")
-                        Spacer()
-                        Image(systemName: "arrow.up.forward")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+            // Quick Actions: Add Connection & Settings
+            HStack(spacing: 8) {
+                Button {
+                    showAddAccountSheet = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus")
+                        Text("Add Connection")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+
+                Button {
+                    WindowManager.shared.showSettings()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "gearshape")
+                        Text("Settings...")
                     }
                     .font(.system(size: 12))
                     .frame(maxWidth: .infinity)
@@ -188,22 +163,6 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.regular)
             }
-
-            // Settings Button
-            Button(action: {
-                WindowManager.shared.showSettings()
-            }) {
-                HStack {
-                    Image(systemName: "gearshape")
-                    Text("Settings...")
-                    Spacer()
-                }
-                .font(.system(size: 12))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
 
             Divider()
 
@@ -228,7 +187,122 @@ struct ContentView: View {
             }
         }
         .padding(14)
-        .frame(width: 300)
+        .frame(width: 340)
+        .onAppear {
+            driveManager.refreshAccounts()
+            driveManager.syncNow()
+        }
+        .sheet(isPresented: $showAddAccountSheet) {
+            AddConnectionView()
+                .environmentObject(driveManager)
+        }
+    }
+
+    private var statusSummaryText: String {
+        if driveManager.accounts.isEmpty {
+            return "No Accounts"
+        }
+        let total = driveManager.accounts.count
+        let connected = driveManager.connectedCount
+        if total == 1 {
+            return driveManager.state.statusTitle
+        }
+        return "\(connected)/\(total) Connected"
+    }
+
+    private func accountCard(for account: RemoteAccount) -> some View {
+        let accountState = driveManager.stateForAccount(account)
+        let isSyncing = driveManager.isAccountSyncing(account)
+        let syncText = driveManager.formattedLastSync(for: account)
+
+        return VStack(spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                ProviderLogoView(provider: account.provider, size: 24)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(account.displayTitle)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+
+                    Text(account.mountPath)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(accountState.statusColor)
+                            .frame(width: 5, height: 5)
+                        Text(isSyncing ? "Syncing..." : (accountState.isConnected ? syncText : accountState.statusTitle))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 1)
+                }
+
+                Spacer(minLength: 6)
+
+                Toggle(isOn: Binding(
+                    get: {
+                        accountState.isConnected || accountState == .connecting
+                    },
+                    set: { _ in
+                        driveManager.toggleAccountConnection(account)
+                    }
+                )) {
+                    EmptyView()
+                }
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(accountState.isTransitioning)
+            }
+
+            // Quick actions per account when connected
+            if accountState.isConnected {
+                HStack(spacing: 6) {
+                    Button {
+                        driveManager.openAccountInFinder(account)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder")
+                            Text("Open in Finder")
+                            Image(systemName: "arrow.up.forward")
+                                .font(.caption2)
+                        }
+                        .font(.system(size: 11))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 3)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button {
+                        driveManager.syncAccount(account)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .rotationEffect(.degrees(isSyncing ? 360 : 0))
+                                .animation(isSyncing ? Animation.linear(duration: 1).repeatForever(autoreverses: false) : .default, value: isSyncing)
+                            Text(isSyncing ? "Syncing" : "Sync")
+                        }
+                        .font(.system(size: 11))
+                        .padding(.vertical, 3)
+                        .padding(.horizontal, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isSyncing)
+                    .help("Force immediate refresh from cloud")
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
     }
 }
 

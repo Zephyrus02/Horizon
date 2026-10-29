@@ -29,6 +29,7 @@ struct SettingsView: View {
     }
 
     @State private var selectedTab: SettingsTab = .accounts
+    @State private var showAddAccountSheet = false
     @State private var accountToDelete: RemoteAccount? = nil
     @State private var showDeleteConfirmation = false
     @State private var accountToLogout: RemoteAccount? = nil
@@ -102,7 +103,7 @@ struct SettingsView: View {
 
             // Footer
             HStack {
-                Text(driveManager.state.statusTitle)
+                Text(driveManager.accounts.count > 1 ? "\(driveManager.connectedCount)/\(driveManager.accounts.count) drives connected" : driveManager.state.statusTitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -120,6 +121,10 @@ struct SettingsView: View {
         }
         .frame(width: 680, height: 500)
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $showAddAccountSheet) {
+            AddConnectionView()
+                .environmentObject(driveManager)
+        }
         .alert("Delete Connection?", isPresented: $showDeleteConfirmation, presenting: accountToDelete) { acc in
             Button("Delete Connection", role: .destructive) {
                 Task {
@@ -150,77 +155,24 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Connected Accounts")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Manage cloud drives mounted in Finder")
+                    Text("Manage cloud drives mounted simultaneously in Finder")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
-                if !driveManager.isAuthenticating {
-                    Button {
-                        Task {
-                            _ = await driveManager.startGoogleDriveConnection()
-                        }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "plus")
-                            Text("Add Account")
-                        }
-                        .font(.system(size: 12, weight: .medium))
+                Button {
+                    showAddAccountSheet = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus")
+                        Text("Add Account")
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .font(.system(size: 12, weight: .medium))
                 }
-            }
-
-            // Authentication in progress notification
-            if driveManager.isAuthenticating {
-                HStack(spacing: 12) {
-                    ProgressView()
-                        .controlSize(.small)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Authorizing new account in browser...")
-                            .font(.system(size: 13, weight: .medium))
-                        Text("Complete the sign-in prompt in your web browser.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    Button("Cancel") {
-                        driveManager.cancelAuthentication()
-                    }
-                    .controlSize(.small)
-                }
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.1))
-                )
-            }
-
-            // Authentication error if any
-            if let err = driveManager.authError {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                    Text(err)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                    Spacer()
-                    Button("Dismiss") {
-                        driveManager.authError = nil
-                    }
-                    .font(.caption2)
-                }
-                .padding(10)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.red.opacity(0.1))
-                )
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
 
             // List of Accounts
@@ -233,10 +185,8 @@ struct SettingsView: View {
                         .font(.system(size: 14))
                         .foregroundStyle(.secondary)
 
-                    Button("Connect Google Drive") {
-                        Task {
-                            _ = await driveManager.startGoogleDriveConnection()
-                        }
+                    Button("Add Connection") {
+                        showAddAccountSheet = true
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.regular)
@@ -255,17 +205,22 @@ struct SettingsView: View {
                 }
             }
 
-            // Add Account Card
+            // Add Account Quick Button
             VStack(alignment: .leading, spacing: 10) {
-                Text("Add New Connection")
+                Text("Add Another Connection")
                     .font(.system(size: 13, weight: .semibold))
 
                 HStack {
-                    GoogleDriveLogoView(size: 24)
+                    HStack(spacing: 6) {
+                        GoogleDriveLogoView(size: 20)
+                        OneDriveLogoView(size: 20)
+                        DropboxLogoView(size: 20)
+                    }
+
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Google Drive")
+                        Text("Connect Cloud Drive")
                             .font(.system(size: 13, weight: .medium))
-                        Text("Connect another personal or Google Workspace account")
+                        Text("Add Google Drive, OneDrive, or Dropbox with custom name & folder")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -273,16 +228,13 @@ struct SettingsView: View {
                     Spacer()
 
                     Button {
-                        Task {
-                            _ = await driveManager.startGoogleDriveConnection()
-                        }
+                        showAddAccountSheet = true
                     } label: {
-                        Text("Connect")
+                        Text("Add...")
                             .font(.system(size: 12, weight: .medium))
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.regular)
-                    .disabled(driveManager.isAuthenticating)
                 }
                 .padding(12)
                 .background(
@@ -295,23 +247,24 @@ struct SettingsView: View {
     }
 
     private func accountRow(account: RemoteAccount) -> some View {
-        VStack(spacing: 10) {
+        let accState = driveManager.stateForAccount(account)
+
+        return VStack(spacing: 10) {
             HStack(spacing: 12) {
-                GoogleDriveLogoView(size: 28)
+                ProviderLogoView(provider: account.provider, size: 28)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(account.displayTitle)
                             .font(.system(size: 14, weight: .semibold))
 
-                        // Status pill
                         Circle()
-                            .fill(driveManager.state.isConnected ? Color.green : Color.secondary)
+                            .fill(accState.statusColor)
                             .frame(width: 7, height: 7)
 
-                        Text(driveManager.state.isConnected ? "Mounted" : "Disconnected")
+                        Text(accState.statusTitle)
                             .font(.caption2)
-                            .foregroundStyle(driveManager.state.isConnected ? .green : .secondary)
+                            .foregroundStyle(accState.statusColor)
                     }
 
                     Text("Mount Location: \(account.mountPath)")
@@ -323,9 +276,9 @@ struct SettingsView: View {
 
                 // Actions
                 HStack(spacing: 8) {
-                    if driveManager.state.isConnected {
+                    if accState.isConnected {
                         Button {
-                            driveManager.openInFinder()
+                            driveManager.openAccountInFinder(account)
                         } label: {
                             Image(systemName: "folder")
                                 .font(.system(size: 12))
@@ -335,16 +288,17 @@ struct SettingsView: View {
                         .controlSize(.small)
 
                         Button("Disconnect") {
-                            driveManager.disconnect()
+                            driveManager.disconnectAccount(account)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     } else {
                         Button("Connect") {
-                            driveManager.connect()
+                            driveManager.connectAccount(account)
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
+                        .disabled(accState.isTransitioning)
                     }
 
                     // Logout Button
@@ -495,19 +449,41 @@ struct SettingsView: View {
             VStack(spacing: 4) {
                 Text("Horizon")
                     .font(.system(size: 20, weight: .bold))
-                Text("Version 1.0 (Build 1)")
-                    .font(.caption)
+
+                Text("Cloud Drive for macOS")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
+
+                Text("Version 1.0 (Build 1)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
 
-            Text("Native Cloud Storage Streaming for macOS.\nStream Google Drive directly in Finder with zero disk consumption.")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
+            VStack(spacing: 6) {
+                Text("Native, high-performance cloud storage mounting via macOS Kernel NFS.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+
+                Text("Supports multiple concurrent Google Drive, OneDrive, and Dropbox connections with SQLite metadata persistence.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+            .padding(.top, 4)
 
             Spacer(minLength: 20)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+struct SettingsView_Previews: PreviewProvider {
+    static var previews: some View {
+        SettingsView()
+            .environmentObject(DriveManager.shared)
+            .environmentObject(WindowManager.shared)
     }
 }
