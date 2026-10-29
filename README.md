@@ -71,13 +71,21 @@ Horizon executes `rclone nfsmount` configured with the following tuned parameter
 | `Remote` | `gdrive:` | Configured Google Drive remote |
 | `Mount Point` | `~/GDrive` | Dedicated local mount folder |
 | `--vfs-cache-mode` | `full` | Full chunk caching on disk for streaming and in-place saves |
+| `--vfs-read-chunk-streams` | `4` | Concurrent streams for multi-threaded chunk downloads (eliminates NFS timeout) |
+| `--vfs-read-chunk-size` | `8M` | Initial chunk read size for instant file opens (<150ms) |
+| `--vfs-read-chunk-size-limit` | `off` | Allows chunk doubling for continuous sequential reading (e.g. 4K video) |
+| `--vfs-read-wait` | `20ms` | Wait window before seeking to prevent stream thrashing |
+| `--vfs-read-ahead` | `128M` | Prefetches sequential video/doc data ahead of read pointer |
+| `--buffer-size` | `32M` | In-memory buffer per open file |
 | `--cache-dir` | `~/Library/Caches/Horizon/rclone` | Isolated disk cache path |
-| `--vfs-cache-max-size` | `20G` | Caps total local disk cache size |
+| `--vfs-cache-max-size` | `50G` | Caps total local disk cache size |
 | `--vfs-cache-max-age` | `24h` | Retains untouched cached data for 24 hours |
-| `--vfs-read-ahead` | `256M` | Prefetches sequential data to eliminate playback stalls |
+| `--dir-cache-time` | `72h` | In-memory directory structure cache for zero-lag folder browsing |
+| `--poll-interval` | `0` | Disables background polling to eliminate Finder lockups |
 | `--vfs-write-back` | `5s` | 5-second delay before queued saves upload to Drive |
-| `--buffer-size` | `64M` | In-memory buffer per open file |
 | `--drive-chunk-size` | `64M` | Multi-part upload chunk size for faster transfers |
+| `--drive-pacer-min-sleep` | `10ms` | Accelerates Google Drive API requests by 10x |
+| `--drive-pacer-burst` | `200` | Handles burst metadata requests from macOS QuickLook/Preview |
 | `--drive-export-formats` | `webloc` | Exports Google Docs/Sheets as clickable browser shortcuts |
 | `--nfs-cache-type` | `disk` | Preserves file handles across restarts |
 | `--rc` | `127.0.0.1:5572` | Local remote-control API for transfer stats & queue polling |

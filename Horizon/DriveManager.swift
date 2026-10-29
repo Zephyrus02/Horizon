@@ -105,11 +105,6 @@ final class DriveManager: ObservableObject {
 
         // Initialize SQLite and load accounts
         loadAccountsSync()
-
-        // Start background sync loop if any account is mounted
-        if connectedCount > 0 {
-            startPeriodicSync()
-        }
     }
 
     private func migrateDefaultConfigIfNeeded() {
@@ -444,6 +439,9 @@ final class DriveManager: ObservableObject {
         let accountCache = (cacheDir as NSString).appendingPathComponent(account.name)
         try? FileManager.default.createDirectory(atPath: accountCache, withIntermediateDirectories: true)
 
+        let nfsCacheDir = (accountCache as NSString).appendingPathComponent("nfs-handles")
+        try? FileManager.default.createDirectory(atPath: nfsCacheDir, withIntermediateDirectories: true)
+
         let accountLog = ((logFile as NSString).deletingLastPathComponent as NSString).appendingPathComponent("rclone-\(account.name).log")
 
         let rcPort = allocateRcPort(for: account.id)
@@ -456,26 +454,27 @@ final class DriveManager: ObservableObject {
             "--volname", account.displayName,
             "--vfs-cache-mode", "full",
             "--cache-dir", accountCache,
-            "--vfs-cache-max-size", "20G",
+            "--vfs-cache-max-size", "50G",
             "--vfs-cache-max-age", "24h",
+            // Multi-stream parallel reads & responsive chunking: 4 concurrent connections prevent macOS NFS timeouts
+            "--vfs-read-chunk-streams", "4",
+            "--vfs-read-chunk-size", "8M",
+            "--vfs-read-chunk-size-limit", "off",
+            "--vfs-read-wait", "20ms",
             "--vfs-read-ahead", "128M",
-            "--vfs-write-back", "2s",
-            "--vfs-fast-fingerprint",
-            "--vfs-refresh",
-            "--dir-cache-time", "15s",
-            "--poll-interval", "5s",
-            "--attr-timeout", "1s",
             "--buffer-size", "32M",
-            "--drive-chunk-size", "32M",
-            "--drive-export-formats", "webloc",
+            "--vfs-write-back", "5s",
+            // Instant folder browsing without background poll drops
+            "--dir-cache-time", "72h",
+            "--poll-interval", "0",
+            // Google Drive tuning: fast API pacing and upload chunk size
+            "--drive-chunk-size", "64M",
             "--drive-pacer-min-sleep", "10ms",
             "--drive-pacer-burst", "200",
-            "--tpslimit", "10",
-            "--tpslimit-burst", "20",
-            "--noapplexattr",
-            "--noappledouble",
-            "--nfs-cache-type", "memory",
-            "--nfs-cache-handle-limit", "1000000",
+            "--drive-export-formats", "webloc",
+            // Proven Stage 1 disk-backed NFS handle cache
+            "--nfs-cache-type", "disk",
+            // RC API & Logs
             "--rc",
             "--rc-addr", "127.0.0.1:\(rcPort)",
             "--rc-user", "app",
@@ -547,8 +546,6 @@ final class DriveManager: ObservableObject {
                 self.accountStates[accountId] = .connected
                 self.updateAccountConnection(id: accountId, isConnected: true)
                 self.updateOverallState()
-                self.startPeriodicSync()
-                self.syncAccount(account)
             } else {
                 let err = "Mount timed out or failed to mount."
                 self.accountStates[accountId] = .error(err)
@@ -781,22 +778,24 @@ final class DriveManager: ObservableObject {
     nonisolated static func unmountVolume(path: String) {
         let standardized = URL(fileURLWithPath: path).standardized.path
 
-        let p1 = Process()
-        p1.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        p1.arguments = ["unmount", "force", standardized]
-        p1.standardOutput = FileHandle.nullDevice
-        p1.standardError = FileHandle.nullDevice
-        try? p1.run()
-        p1.waitUntilExit()
+        // 1. Polite clean unmount first so macOS NetAuthSysAgent doesn't trigger "Server connections interrupted"
+        let pClean = Process()
+        pClean.executableURL = URL(fileURLWithPath: "/sbin/umount")
+        pClean.arguments = [standardized]
+        pClean.standardOutput = FileHandle.nullDevice
+        pClean.standardError = FileHandle.nullDevice
+        try? pClean.run()
+        pClean.waitUntilExit()
 
+        // 2. Only if still mounted after polite unmount, use force unmount
         if isPathMounted(standardized) {
-            let p2 = Process()
-            p2.executableURL = URL(fileURLWithPath: "/sbin/umount")
-            p2.arguments = ["-f", standardized]
-            p2.standardOutput = FileHandle.nullDevice
-            p2.standardError = FileHandle.nullDevice
-            try? p2.run()
-            p2.waitUntilExit()
+            let pForce = Process()
+            pForce.executableURL = URL(fileURLWithPath: "/sbin/umount")
+            pForce.arguments = ["-f", standardized]
+            pForce.standardOutput = FileHandle.nullDevice
+            pForce.standardError = FileHandle.nullDevice
+            try? pForce.run()
+            pForce.waitUntilExit()
         }
     }
 
@@ -838,7 +837,6 @@ final class DriveManager: ObservableObject {
     }
 
     func openAccountInFinder(_ account: RemoteAccount) {
-        syncAccount(account)
         let url = URL(fileURLWithPath: account.mountPath)
         NSWorkspace.shared.open(url)
     }
@@ -859,25 +857,9 @@ final class DriveManager: ObservableObject {
         try? FileManager.default.createDirectory(atPath: cacheDir, withIntermediateDirectories: true)
     }
 
-    // MARK: - Two-Way Synchronization
-
+    // MARK: - On-Demand Refresh
     func startPeriodicSync() {
-        stopPeriodicSync()
-        syncTask = Task.detached(priority: .utility) { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
-                guard !Task.isCancelled else { break }
-                guard let self = self else { break }
-
-                let mounted = await MainActor.run {
-                    self.accounts.filter { self.stateForAccount($0) == .connected }
-                }
-
-                for acc in mounted {
-                    await self.syncAccountAsync(acc, forceRefresh: false)
-                }
-            }
-        }
+        // Disabled: Cloud drive is not updated often from outside, avoiding periodic cache/NFS churn
     }
 
     func stopPeriodicSync() {
@@ -906,7 +888,7 @@ final class DriveManager: ObservableObject {
             self.isSyncing = true
         }
 
-        // Only invoke rclone RC vfs/refresh if requested AND if the rclone process is actively running
+        // Only invoke rclone RC vfs/refresh if explicitly requested
         if forceRefresh,
            let proc = runningProcesses[accountId], proc.isRunning,
            let port = accountRcPorts[accountId],
@@ -915,7 +897,6 @@ final class DriveManager: ObservableObject {
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            // Pass _async: true so rclone immediately queues the refresh in the background and returns HTTP 200 in <1ms without blocking or timing out
             request.httpBody = "{\"_async\":true}".data(using: .utf8)
             let authString = "app:secret123"
             if let authData = authString.data(using: .utf8) {
@@ -931,8 +912,6 @@ final class DriveManager: ObservableObject {
             _ = try? await session.data(for: request)
         }
 
-        Self.notifyFinder(path: account.mountPath)
-
         await MainActor.run {
             self.accountSyncing[accountId] = false
             self.accountLastSync[accountId] = Date()
@@ -942,24 +921,6 @@ final class DriveManager: ObservableObject {
     }
 
     nonisolated static func notifyFinder(path: String) {
-        let script = """
-        tell application "Finder"
-            try
-                update item (POSIX file "\(path)")
-                repeat with w in (get windows)
-                    try
-                        set targetPath to POSIX path of (target of w as alias)
-                        if targetPath starts with "\(path)" then
-                            update target of w
-                        end if
-                    end try
-                end repeat
-            end try
-        end tell
-        """
-        DispatchQueue.global(qos: .utility).async {
-            let appleScript = NSAppleScript(source: script)
-            appleScript?.executeAndReturnError(nil)
-        }
+        // No-op: Do not trigger AppleScript window updates to avoid invalidating active NFS file handles
     }
 }

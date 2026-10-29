@@ -190,7 +190,6 @@ struct ContentView: View {
         .frame(width: 340)
         .onAppear {
             driveManager.refreshAccounts()
-            driveManager.syncNow()
         }
         .sheet(isPresented: $showAddAccountSheet) {
             AddConnectionView()
