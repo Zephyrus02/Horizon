@@ -300,7 +300,13 @@ final class DriveManager: ObservableObject {
         )
     }
 
-    func startConnection(displayName: String, mountPath: String, provider: String = "drive") async -> Bool {
+    func startConnection(
+        displayName: String,
+        mountPath: String,
+        provider: String = "drive",
+        clientId: String? = nil,
+        clientSecret: String? = nil
+    ) async -> Bool {
         guard let rclone = Self.findRcloneExecutable() else {
             self.authError = "rclone executable was not found."
             return false
@@ -319,16 +325,31 @@ final class DriveManager: ObservableObject {
             counter += 1
         }
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: rclone)
-        proc.arguments = [
+        var configArgs = [
             "config", "create",
             remoteName,
             provider,
             "scope", "drive",
-            "config_shared_client_id", "true",
             "--config", configPath
         ]
+
+        let trimmedClientId = clientId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let trimmedClientSecret = clientSecret?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if !trimmedClientId.isEmpty && !trimmedClientSecret.isEmpty {
+            configArgs.append(contentsOf: [
+                "client_id", trimmedClientId,
+                "client_secret", trimmedClientSecret
+            ])
+        } else {
+            configArgs.append(contentsOf: [
+                "config_shared_client_id", "true"
+            ])
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: rclone)
+        proc.arguments = configArgs
 
         var env = ProcessInfo.processInfo.environment
         let extraPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -461,7 +482,7 @@ final class DriveManager: ObservableObject {
             "--vfs-read-chunk-size", "8M",
             "--vfs-read-chunk-size-limit", "off",
             "--vfs-read-wait", "20ms",
-            "--vfs-read-ahead", "128M",
+            "--vfs-read-ahead", "256M",
             "--buffer-size", "32M",
             "--vfs-write-back", "5s",
             // Instant folder browsing without background poll drops

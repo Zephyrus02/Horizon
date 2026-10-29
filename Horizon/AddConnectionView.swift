@@ -17,6 +17,9 @@ struct AddConnectionView: View {
     @State private var mountPath: String = ""
     @State private var isCustomMountPath: Bool = false
     @State private var isSubmitting: Bool = false
+    @State private var showAdvancedOptions: Bool = false
+    @State private var customClientId: String = ""
+    @State private var customClientSecret: String = ""
 
     var onComplete: (() -> Void)? = nil
 
@@ -115,6 +118,40 @@ struct AddConnectionView: View {
                         Text("Files in this cloud account will be accessed through this local folder.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                    }
+
+                    // 4. Advanced Google Cloud Client ID (Optional)
+                    if selectedProvider == "drive" {
+                        DisclosureGroup(isExpanded: $showAdvancedOptions) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Using your own Google Cloud Desktop Client ID bypasses Google's shared rate limits and unlocks full bandwidth for 4K video and large files.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Client ID (Optional)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    TextField("e.g. 123456789.apps.googleusercontent.com", text: $customClientId)
+                                        .textFieldStyle(.roundedBorder)
+                                        .font(.system(size: 11, design: .monospaced))
+                                }
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Client Secret (Optional)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    SecureField("Client Secret", text: $customClientSecret)
+                                        .textFieldStyle(.roundedBorder)
+                                        .font(.system(size: 11, design: .monospaced))
+                                }
+                            }
+                            .padding(.top, 4)
+                        } label: {
+                            Text("Advanced: Custom Google Client ID (Recommended for 4K)")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     // Status / Progress indicator
@@ -269,7 +306,9 @@ struct AddConnectionView: View {
             let success = await driveManager.startConnection(
                 displayName: name,
                 mountPath: resolvedPath,
-                provider: selectedProvider
+                provider: selectedProvider,
+                clientId: customClientId,
+                clientSecret: customClientSecret
             )
             isSubmitting = false
             if success {

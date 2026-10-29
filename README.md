@@ -75,7 +75,7 @@ Horizon executes `rclone nfsmount` configured with the following tuned parameter
 | `--vfs-read-chunk-size` | `8M` | Initial chunk read size for instant file opens (<150ms) |
 | `--vfs-read-chunk-size-limit` | `off` | Allows chunk doubling for continuous sequential reading (e.g. 4K video) |
 | `--vfs-read-wait` | `20ms` | Wait window before seeking to prevent stream thrashing |
-| `--vfs-read-ahead` | `128M` | Prefetches sequential video/doc data ahead of read pointer |
+| `--vfs-read-ahead` | `256M` | Prefetches sequential video/doc data ahead of read pointer |
 | `--buffer-size` | `32M` | In-memory buffer per open file |
 | `--cache-dir` | `~/Library/Caches/Horizon/rclone` | Isolated disk cache path |
 | `--vfs-cache-max-size` | `50G` | Caps total local disk cache size |
