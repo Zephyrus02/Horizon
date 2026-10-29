@@ -37,13 +37,32 @@ final class DriveManager: ObservableObject {
     // MARK: - Executable Finder
 
     nonisolated static func findRcloneExecutable() -> String? {
-        // 1. Check bundled binary inside app resources
+        // 1. Check bundled binary in all standard bundle locations
+        // a. Via url(forAuxiliaryExecutable:) (checks Contents/MacOS & Contents/Helpers)
+        if let auxURL = Bundle.main.url(forAuxiliaryExecutable: "rclone"),
+           FileManager.default.isExecutableFile(atPath: auxURL.path) {
+            return auxURL.path
+        }
+
+        // b. Via path(forResource:ofType:)
         if let bundlePath = Bundle.main.path(forResource: "rclone", ofType: nil),
            FileManager.default.isExecutableFile(atPath: bundlePath) {
             return bundlePath
         }
 
-        // 2. Check standard installation directories
+        // c. Directly in Contents/Resources/rclone
+        if let resURL = Bundle.main.resourceURL?.appendingPathComponent("rclone"),
+           FileManager.default.isExecutableFile(atPath: resURL.path) {
+            return resURL.path
+        }
+
+        // d. In nested Resources folder inside bundle
+        if let nestedResURL = Bundle.main.resourceURL?.appendingPathComponent("Resources/rclone"),
+           FileManager.default.isExecutableFile(atPath: nestedResURL.path) {
+            return nestedResURL.path
+        }
+
+        // 2. Check standard installation directories (development fallback)
         let commonPaths = [
             "/opt/homebrew/bin/rclone",
             "/usr/local/bin/rclone",

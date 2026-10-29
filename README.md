@@ -150,6 +150,7 @@ Horizon/
 │   ├── DriveManager.swift     # rclone process supervisor, statfs mount checker, unmount
 │   ├── DriveState.swift       # State machine (disconnected, connecting, connected, etc.)
 │   ├── Assets.xcassets/       # AppIcon & MenuBarIcon template assets
+│   ├── Resources/             # Bundled rclone Apple Silicon (arm64) binary & license
 │   └── docs/                  # Architecture specifications & stage test logs
 └── README.md
 ```
