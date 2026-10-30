@@ -24,6 +24,9 @@ struct SetupView: View {
     @State private var isCustomMount: Bool = false
     @State private var selectedProvider: String = "drive"
     @State private var isConnecting: Bool = false
+    @State private var showAdvancedOptions: Bool = false
+    @State private var customClientId: String = ""
+    @State private var customClientSecret: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -232,6 +235,40 @@ struct SetupView: View {
                         .controlSize(.small)
                     }
                 }
+
+                // Advanced Google Cloud Client ID (Optional)
+                if selectedProvider == "drive" {
+                    DisclosureGroup(isExpanded: $showAdvancedOptions) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Using your own Google Cloud Desktop Client ID bypasses Google's shared rate limits and enables full speed for 4K video.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Client ID (Optional)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                TextField("e.g. 123456789.apps.googleusercontent.com", text: $customClientId)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Client Secret (Optional)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                SecureField("Client Secret", text: $customClientSecret)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+                        }
+                        .padding(.top, 4)
+                    } label: {
+                        Text("Advanced: Custom Google Client ID (Recommended for 4K)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .padding(18)
             .background(
@@ -309,7 +346,9 @@ struct SetupView: View {
                         let success = await driveManager.startConnection(
                             displayName: name,
                             mountPath: mountPath,
-                            provider: selectedProvider
+                            provider: selectedProvider,
+                            clientId: customClientId,
+                            clientSecret: customClientSecret
                         )
                         isConnecting = false
                         if success {
