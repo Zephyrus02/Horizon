@@ -1,1 +1,10 @@
 Horizon/Resources/rclone
+build/
+dmg_root/
+TestResults.xcresult/
+coverage_report.txt
+coverage.json
+Horizon.dmg
+pr_comment.md
+test_build.log
+test_report.md
