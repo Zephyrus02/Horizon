@@ -147,19 +147,100 @@ During Stage 1 validation on Apple Silicon:
 
 ---
 
+## Testing & CI Pipeline Scripts
+
+Horizon includes a local test simulation script that mirrors the GitHub Actions CI pipeline step-by-step.
+
+### Run All CI Steps Locally
+
+To test building, running the Swift test suite, extracting code coverage, compiling the Release app, packaging `Horizon.dmg`, and generating the PR report locally:
+
+```bash
+./scripts/test_ci_locally.sh
+```
+
+### Individual Script Commands
+
+You can also run individual steps manually from your terminal:
+
+#### 1. Run Unit Tests with Code Coverage
+```bash
+xcodebuild test \
+  -project Horizon.xcodeproj \
+  -scheme Horizon \
+  -destination 'platform=macOS' \
+  -enableCodeCoverage YES \
+  -resultBundlePath TestResults.xcresult \
+  CODE_SIGN_IDENTITY="" \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGNING_ALLOWED=NO \
+  | tee test_build.log
+```
+
+#### 2. Extract Code Coverage Report
+```bash
+# JSON coverage summary
+xcrun xccov view --report --json TestResults.xcresult > coverage.json
+
+# Text coverage report
+xcrun xccov view --report TestResults.xcresult > coverage_report.txt
+```
+
+#### 3. Build Release App
+```bash
+xcodebuild build \
+  -project Horizon.xcodeproj \
+  -scheme Horizon \
+  -configuration Release \
+  -destination 'platform=macOS' \
+  -derivedDataPath build \
+  CODE_SIGN_IDENTITY="" \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+#### 4. Package `Horizon.dmg` Disk Image Installer
+```bash
+mkdir -p dmg_root
+cp -R build/Build/Products/Release/Horizon.app dmg_root/
+ln -s /Applications dmg_root/Applications
+hdiutil create -volname "Horizon" -srcfolder dmg_root -ov -format UDZO Horizon.dmg
+```
+
+#### 5. Generate Markdown Test & PR Summary Report
+```bash
+python3 .github/scripts/generate_ci_report.py test_build.log coverage.json coverage_report.txt Horizon.dmg
+cat pr_comment.md
+```
+
+---
+
 ## Project Structure
 
 ```
 Horizon/
-├── Horizon.xcodeproj          # Xcode project configuration
+├── .github/
+│   ├── workflows/
+│   │   └── ci.yml                 # GitHub Actions CI pipeline (Build, Test, Coverage, DMG, PR Comment)
+│   └── scripts/
+│       └── generate_ci_report.py  # Test & coverage report generator for CI / PR comments
+├── scripts/
+│   └── test_ci_locally.sh         # Local CI pipeline runner script
+├── Horizon.xcodeproj              # Xcode project configuration & shared scheme
 ├── Horizon/
-│   ├── HorizonApp.swift       # App lifecycle & MenuBarExtra scene declaration
-│   ├── ContentView.swift      # Menu-bar popover UI & Connect toggle switch
-│   ├── DriveManager.swift     # rclone process supervisor, statfs mount checker, unmount
-│   ├── DriveState.swift       # State machine (disconnected, connecting, connected, etc.)
-│   ├── Assets.xcassets/       # AppIcon & MenuBarIcon template assets
-│   ├── Resources/             # Bundled rclone Apple Silicon (arm64) binary & license
-│   └── docs/                  # Architecture specifications & stage test logs
+│   ├── HorizonApp.swift           # App lifecycle & MenuBarExtra scene declaration
+│   ├── ContentView.swift          # Menu-bar popover UI & multi-account card list
+│   ├── DriveManager.swift         # rclone process supervisor, mount engine & RC API client
+│   ├── DriveState.swift           # State machine (disconnected, connecting, connected, etc.)
+│   ├── AccountDatabase.swift      # SQLite3 account storage engine
+│   ├── AddConnectionView.swift    # Add connection modal with custom OAuth credentials support
+│   ├── SetupView.swift            # First-launch onboarding wizard
+│   ├── SettingsView.swift         # General preferences & launch-at-login
+│   ├── Assets.xcassets/           # AppIcon & MenuBarIcon template assets
+│   ├── Resources/                 # Bundled rclone Apple Silicon (arm64) binary & license
+│   └── docs/                      # Architecture specifications & stage test logs
+├── HorizonTests/                  # Swift Testing unit test suite
+├── HorizonUITests/                # UI test suite
 └── README.md
 ```
 
