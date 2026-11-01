@@ -16,7 +16,9 @@ struct AccountDatabaseTests {
         let dir = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("accounts.db").path
-        try body(AccountDatabase(dbPath: path), path)
+        let db = AccountDatabase(dbPath: path)
+        defer { db.close() }
+        try body(db, path)
     }
 
     private func account(
@@ -54,6 +56,7 @@ struct AccountDatabaseTests {
         try withDatabase { db, path in
             db.saveAccount(account(id: "persisted", name: "keep"))
             let reopened = AccountDatabase(dbPath: path)
+            defer { reopened.close() }
             let accounts = reopened.getAllAccounts()
             #expect(accounts.count == 1)
             #expect(accounts.first?.id == "persisted")
@@ -68,6 +71,19 @@ struct AccountDatabaseTests {
         db.deleteAccount(id: "x")
         db.deleteAccountByRemoteName("x")
         #expect(db.getAllAccounts().isEmpty)
+    }
+
+    @Test func closedDatabaseIgnoresFurtherCalls() throws {
+        try withDatabase { db, _ in
+            db.saveAccount(account(id: "a", name: "a"))
+            db.close()
+            db.close()                                   // idempotent
+            #expect(db.getAllAccounts().isEmpty)         // no crash, nothing readable
+            db.saveAccount(account(id: "b", name: "b"))
+            db.updateConnectionStatus(id: "a", isConnected: true)
+            db.deleteAccount(id: "a")
+            db.deleteAccountByRemoteName("a")
+        }
     }
 
     // MARK: Insert / read
@@ -239,8 +255,8 @@ struct AccountDatabaseTests {
 
     @Test func concurrentWritesAreSerialised() async throws {
         let dir = try makeTempDirectory()
-        defer { try? FileManager.default.removeItem(at: dir) }
         let db = AccountDatabase(dbPath: dir.appendingPathComponent("c.db").path)
+        defer { db.close(); try? FileManager.default.removeItem(at: dir) }
 
         await withTaskGroup(of: Void.self) { group in
             for i in 0..<50 {

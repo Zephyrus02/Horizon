@@ -90,10 +90,41 @@ jobs:
           hdiutil create -volname "Horizon" -srcfolder dmg_root -ov -format UDZO Horizon.dmg
         continue-on-error: true
 
+      - name: Test CI report scripts
+        if: always()
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+
       - name: Generate CI Summary Report
         if: always()
         run: |
           python3 .github/scripts/generate_ci_report.py test_build.log coverage.json coverage_report.txt Horizon.dmg
+
+      # Uploaded without zipping (archive: false) so it can be opened straight from the
+      # run page / PR comment instead of being downloaded and unzipped first.
+      - name: Upload HTML Report
+        id: html_report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          path: test_report.html
+          archive: false
+          overwrite: true
+          if-no-files-found: ignore
+
+      - name: Link HTML Report & Publish Run Summary
+        if: always()
+        env:
+          REPORT_URL: ${{ steps.html_report.outputs.artifact-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Fall back to the run page if the upload produced no URL.
+          export URL="${REPORT_URL:-$RUN_URL}"
+          echo "HTML report: $URL"
+          for f in pr_comment.md test_report.md; do
+            if [ -f "$f" ]; then perl -pi -e 's/__HTML_REPORT_URL__/$ENV{URL}/g' "$f"; fi
+          done
+          # The run summary renders on the Actions run page – full details with no download.
+          if [ -f pr_comment.md ]; then cat pr_comment.md >> "$GITHUB_STEP_SUMMARY"; fi
 
       - name: Upload DMG Artifact
         if: always() && steps.package_dmg.outcome == 'success'
@@ -110,6 +141,7 @@ jobs:
           name: Horizon-Test-Report
           path: |
             test_report.md
+            test_report.html
             coverage_report.txt
             coverage.json
             test_build.log

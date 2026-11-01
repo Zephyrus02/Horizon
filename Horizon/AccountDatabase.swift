@@ -34,6 +34,17 @@ final class AccountDatabase: @unchecked Sendable {
         }
     }
 
+    /// Closes the connection. Later calls become harmless no-ops (SQLite reports MISUSE).
+    /// Needed when the backing file is about to be deleted while this object is still alive.
+    func close() {
+        queue.sync {
+            if let handle = db {
+                sqlite3_close(handle)
+                db = nil
+            }
+        }
+    }
+
     private func openDatabase() {
         if sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
             print("Error opening database at \(dbPath): \(String(cString: sqlite3_errmsg(db)))")

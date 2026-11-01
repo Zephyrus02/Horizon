@@ -232,6 +232,7 @@ final class TestHarness {
     /// Stops every spawned process and removes all temp state. Call from `defer`.
     func cleanup() {
         manager.disconnectSync()
+        database.close()   // don't unlink the file under an open SQLite handle
         defaults.removePersistentDomain(forName: defaultsSuite)
         try? FileManager.default.removeItem(at: root)
     }
