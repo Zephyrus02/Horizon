@@ -12,12 +12,6 @@ export default function Hero() {
       <div className="hero__stars" aria-hidden="true" />
 
       <div className="container hero__content">
-        <a className="pill hero__pill" href={REPO_URL}>
-          <span className="pill__dot" />
-          Native macOS · Open source · Powered by rclone
-          <Icon name="arrow" size={14} />
-        </a>
-
         <h1 className="hero__title">
           Your cloud,
           <br />
@@ -40,7 +34,6 @@ export default function Hero() {
             View on GitHub
           </a>
         </div>
-        <p className="hero__meta">Requires macOS Sonoma 14.0 or later · Apple Silicon</p>
       </div>
 
       <div className="hero__stage container" ref={stageRef}>
