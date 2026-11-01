@@ -83,8 +83,9 @@ def parse_test_log(log_path):
     # XCTest:         Test Case '-[HorizonTests testRemoteNameSanitization]' passed (0.002 seconds)
     # Swift Testing:  ✔ Test testRemoteNameSanitization() passed after 0.001 seconds.
     #                 ✘ Test "parameterized name" with 3 test cases failed after 0.01 seconds with 1 issue.
+    #                 (Xcode 16 omits the "with N test cases" part: ✔ Test "parameterized name" passed after 0.1 seconds.)
     case_re = re.compile(
-        r"Test (?:Case ['\"]-\[(\w+)\s+(\w+)\]['\"]|(\w+)\(\)|\"([^\"]+)\"\s+with\s+\d+\s+test\s+cases?)"
+        r"Test (?:Case ['\"]-\[(\w+)\s+(\w+)\]['\"]|(\w+)\(\)|\"([^\"]+)\"(?:\s+with\s+\d+\s+test\s+cases?)?)"
         r"\s+(passed|failed)(?:\s+after\s+([\d\.]+)\s+seconds|\s+\(([\d\.]+)\s+seconds\))?"
     )
     seen = set()

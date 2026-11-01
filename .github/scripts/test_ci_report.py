@@ -79,6 +79,12 @@ class ParseTestLog(unittest.TestCase):
         self.assertEqual(s["issues"][0]["location"], "/src/Foo.swift:44")
         self.assertEqual({c["name"] for c in s["suites"]["HorizonTests"]}, {"testA", "testB"})
 
+    def test_xcode16_parameterized_format_without_case_count(self):
+        # Xcode 16.4 (GitHub's macos-15 runner) prints: ✔ Test "name" passed after 0.1 seconds.
+        s = parse('✔ Test "renders each tab" passed after 1.350 seconds.\n✔ Test run with 1 tests passed after 1.4 seconds.\n')
+        self.assertEqual([c["name"] for c in s["suites"]["SwiftTesting"]], ["renders each tab"])
+        self.assertEqual(s["total"], 1)
+
     def test_same_test_name_in_two_suites_is_not_collapsed(self):
         s = parse("✔ Test preview() passed after 0.1 seconds.\n✔ Test preview() passed after 0.2 seconds.\n")
         self.assertEqual(len(s["suites"]["SwiftTesting"]), 2)
