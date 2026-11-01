@@ -3,10 +3,10 @@ import { REPO_URL, RELEASES_URL } from '../links'
 import Icon from './Icon'
 
 const links = [
-  { href: '#features', label: 'Features' },
-  { href: '#how-it-works', label: 'How it works' },
-  { href: '#performance', label: 'Performance' },
-  { href: '#get-started', label: 'Get started' },
+  { href: '/#features', label: 'Features' },
+  { href: '/#how-it-works', label: 'How it works' },
+  { href: '/#performance', label: 'Performance' },
+  { href: '/#get-started', label: 'Get started' },
 ]
 
 export default function Nav() {
@@ -15,7 +15,7 @@ export default function Nav() {
   return (
     <header className={`nav ${scrolled ? 'nav--scrolled' : ''}`}>
       <div className="nav__inner container">
-        <a href="#top" className="brand" aria-label="Horizon home">
+        <a href="/" className="brand" aria-label="Horizon home">
           <img src="/logo.png" alt="" width="28" height="28" />
           <span>Horizon</span>
         </a>

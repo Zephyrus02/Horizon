@@ -1198,6 +1198,66 @@ code {
   color: var(--text);
 }
 
+/* ---------- Legal pages ---------- */
+
+.legal {
+  padding: 140px 0 96px;
+}
+
+.legal__inner {
+  max-width: 760px;
+}
+
+.legal__back {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.legal__back:hover {
+  color: var(--text);
+}
+
+.legal h1 {
+  margin: 24px 0 8px;
+  font-size: clamp(32px, 5vw, 44px);
+  letter-spacing: -0.02em;
+}
+
+.legal__updated {
+  color: var(--faint);
+  font-size: 14px;
+  margin: 0 0 32px;
+}
+
+.legal h2 {
+  margin: 36px 0 10px;
+  font-size: 20px;
+}
+
+.legal p,
+.legal li {
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.legal ul {
+  padding-left: 22px;
+}
+
+.legal a:not(.legal__back) {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.legal code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface-strong);
+}
+
 /* ---------- Responsive ---------- */
 
 @media (max-width: 960px) {
