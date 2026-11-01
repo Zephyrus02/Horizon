@@ -8,3 +8,6 @@ Horizon.dmg
 pr_comment.md
 test_build.log
 test_report.md
+# Python bytecode
+__pycache__/
+*.pyc

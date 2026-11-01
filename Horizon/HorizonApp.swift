@@ -9,13 +9,31 @@ import AppKit
 import SwiftUI
 import Combine
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let driveManagerProvider: () -> DriveManager
+    private let presentSetup: () -> Void
+
+    /// Used by `NSApplicationDelegateAdaptor`: wires the live singletons.
+    override init() {
+        self.driveManagerProvider = { DriveManager.shared }
+        self.presentSetup = { WindowManager.shared.showSetup() }
+        super.init()
+    }
+
+    init(driveManager: DriveManager, presentSetup: @escaping () -> Void) {
+        self.driveManagerProvider = { driveManager }
+        self.presentSetup = presentSetup
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let driveManager = DriveManager.shared
+        let driveManager = driveManagerProvider()
+        let presentSetup = self.presentSetup
 
         if !driveManager.hasCompletedOnboarding || !driveManager.hasConfiguredAccounts {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                WindowManager.shared.showSetup()
+                presentSetup()
             }
         } else {
             NSApp.setActivationPolicy(.accessory)
@@ -26,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        DriveManager.shared.disconnectSync()
+        driveManagerProvider().disconnectSync()
     }
 }
 

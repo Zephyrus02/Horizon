@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 generate_ci_report.py
-Generates Markdown test report, coverage breakdown, and PR comment for Horizon CI.
+Generates Markdown test report, coverage breakdown, PR comment and a self-contained
+HTML report for Horizon CI.
 """
 
 import os
@@ -9,7 +10,11 @@ import sys
 import json
 import hashlib
 import re
+from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from report_html import render_html
 
 def get_file_sha256(filepath):
     if not os.path.exists(filepath):
@@ -33,6 +38,7 @@ def parse_test_log(log_path):
         "total": 0,
         "duration": "N/A",
         "suites": {},
+        "issues": [],
         "status": "UNKNOWN"
     }
 
@@ -42,18 +48,89 @@ def parse_test_log(log_path):
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
 
-    # Look for executed tests summary: "Executed 2 tests, with 0 failures (0 unexpected) in 0.045 (0.046) seconds"
-    exec_matches = re.findall(r"Executed\s+(\d+)\s+tests?,\s+with\s+(\d+)\s+failures?", content)
-    if exec_matches:
-        total_exec = sum(int(m[0]) for m in exec_matches)
-        total_fail = sum(int(m[1]) for m in exec_matches)
-        summary["total"] = total_exec
-        summary["failed"] = total_fail
-        summary["passed"] = max(0, total_exec - total_fail)
+    # --- XCTest summary -------------------------------------------------------------
+    # "Executed 2 tests, with 0 failures (0 unexpected) in 0.045 (0.046) seconds"
+    # With only Swift Testing tests this line still appears, as "Executed 0 tests".
+    xc_total = xc_failed = 0
+    xc_duration = None
+    for m in re.finditer(
+        r"Executed\s+(\d+)\s+tests?,\s+with\s+(\d+)\s+failures?.*?in\s+([\d\.]+)\s+\(([\d\.]+)\)\s+seconds",
+        content,
+    ):
+        xc_total += int(m.group(1))
+        xc_failed += int(m.group(2))
+        xc_duration = m.group(1) and m.group(3)
 
-    duration_match = re.search(r"in\s+([\d\.]+)\s+\(([\d\.]+)\)\s+seconds", content)
-    if duration_match:
-        summary["duration"] = f"{duration_match.group(1)}s"
+    # --- Swift Testing summary ------------------------------------------------------
+    # "✔ Test run with 152 tests in 14 suites passed after 27.425 seconds."
+    # "✘ Test run with 152 tests in 14 suites failed after 59.5 seconds with 3 issues."
+    st_total = 0
+    st_failed = 0
+    st_duration = None
+    run_matches = re.findall(
+        r"Test run with\s+(\d+)\s+tests?(?:\s+in\s+\d+\s+suites?)?\s+(passed|failed)\s+after\s+([\d\.]+)\s+seconds(?:\s+with\s+(\d+)\s+issues?)?",
+        content,
+    )
+    for total, outcome, secs, issues in run_matches:
+        st_total += int(total)
+        st_duration = secs
+        if outcome == "failed":
+            # Number of failed tests is derived from the per-test lines below;
+            # fall back to the issue count if none could be parsed.
+            st_failed = max(st_failed, 1)
+
+    # --- Individual test results ----------------------------------------------------
+    # XCTest:         Test Case '-[HorizonTests testRemoteNameSanitization]' passed (0.002 seconds)
+    # Swift Testing:  ✔ Test testRemoteNameSanitization() passed after 0.001 seconds.
+    #                 ✘ Test "parameterized name" with 3 test cases failed after 0.01 seconds with 1 issue.
+    #                 (Xcode 16 omits the "with N test cases" part: ✔ Test "parameterized name" passed after 0.1 seconds.)
+    case_re = re.compile(
+        r"Test (?:Case ['\"]-\[(\w+)\s+(\w+)\]['\"]|(\w+)\(\)|\"([^\"]+)\"(?:\s+with\s+\d+\s+test\s+cases?)?)"
+        r"\s+(passed|failed)(?:\s+after\s+([\d\.]+)\s+seconds|\s+\(([\d\.]+)\s+seconds\))?"
+    )
+    seen = set()
+    st_failed_cases = 0
+    for tc in case_re.finditer(content):
+        suite = tc.group(1) or "SwiftTesting"
+        name = tc.group(2) or tc.group(3) or tc.group(4)
+        res = tc.group(5)
+        secs = tc.group(6) or tc.group(7)
+        if tc.group(1):
+            # XCTest can echo a case more than once; Swift Testing names may legitimately
+            # repeat across suites, so only de-duplicate XCTest cases.
+            key = (suite, name, res)
+            if key in seen:
+                continue
+            seen.add(key)
+        summary["suites"].setdefault(suite, []).append({
+            "name": name,
+            "status": res.upper(),
+            "duration": float(secs) if secs else None,
+        })
+        if not tc.group(1) and res == "failed":
+            st_failed_cases += 1
+
+    # --- Failure details ------------------------------------------------------------
+    # Swift Testing: ✘ Test foo() recorded an issue at File.swift:12:13: Expectation failed: a == b
+    # XCTest:        /path/File.swift:12: error: -[Class test] : XCTAssertEqual failed ...
+    for m in re.finditer(
+        r"✘ Test (.+?) recorded an issue(?: at (.+?:\d+)(?::\d+)?)?: (.*)", content
+    ):
+        summary["issues"].append({"test": m.group(1), "location": m.group(2) or "", "message": m.group(3).strip()})
+    for m in re.finditer(r"^(\S+?\.swift:\d+): error: -\[(\w+ \w+)\] : (.*)$", content, re.M):
+        summary["issues"].append({"test": m.group(2), "location": m.group(1), "message": m.group(3).strip()})
+
+    if st_failed:
+        st_failed = max(st_failed_cases, 1)
+
+    summary["total"] = xc_total + st_total
+    summary["failed"] = xc_failed + st_failed
+    summary["passed"] = max(0, summary["total"] - summary["failed"])
+
+    durations = [float(d) for d in (xc_duration, st_duration) if d is not None]
+    if durations:
+        # XCTest and Swift Testing run back to back, so the wall time is their sum.
+        summary["duration"] = f"{sum(durations):.3f}s"
 
     if "** TEST SUCCEEDED **" in content:
         summary["status"] = "PASSED"
@@ -61,17 +138,6 @@ def parse_test_log(log_path):
         summary["status"] = "FAILED"
     else:
         summary["status"] = "PASSED" if summary["failed"] == 0 and summary["total"] > 0 else "UNKNOWN"
-
-    # Find individual test cases
-    # e.g.: Test Case '-[HorizonTests testRemoteNameSanitization]' passed (0.002 seconds)
-    test_cases = re.findall(r"Test (?:Case ['\"]-\[(\w+)\s+(\w+)\]['\"]|(\w+)\(\))\s+(passed|failed)", content)
-    for tc in test_cases:
-        suite = tc[0] or "SwiftTesting"
-        name = tc[1] or tc[2]
-        res = tc[3]
-        if suite not in summary["suites"]:
-            summary["suites"][suite] = []
-        summary["suites"][suite].append({"name": name, "status": res.upper()})
 
     return summary
 
@@ -88,6 +154,7 @@ def parse_coverage(json_path, txt_path):
             line_cov = data.get("lineCoverage")
             if line_cov is not None:
                 coverage_info["overall_percentage"] = f"{round(line_cov * 100, 1)}%"
+                coverage_info["overall_pct"] = round(line_cov * 100, 1)
 
             targets = data.get("targets", [])
             for target in targets:
@@ -101,6 +168,7 @@ def parse_coverage(json_path, txt_path):
                     coverage_info["files"].append({
                         "target": target_name,
                         "file": fname,
+                        "pct": round(cov * 100, 1),
                         "percentage": cov_pct,
                         "covered": covered,
                         "total": total
@@ -118,6 +186,7 @@ def parse_coverage(json_path, txt_path):
                     coverage_info["files"].append({
                         "target": "Horizon",
                         "file": match.group(1),
+                        "pct": float(match.group(2)),
                         "percentage": f"{match.group(2)}%",
                         "covered": "-",
                         "total": "-"
@@ -157,6 +226,12 @@ def main():
     comment.append(f"## {status_emoji} Horizon CI Pipeline {status_title}")
     comment.append(f"**Commit:** `{commit_sha}` | **Branch:** `{ref_name}` | **Run:** [#{run_id}]({run_url})\n")
 
+    # Full report link. HTML_REPORT_URL is known only after the artifact upload, so the workflow
+    # replaces this placeholder afterwards (it can also be provided directly via the environment).
+    html_url = os.environ.get("HTML_REPORT_URL", "__HTML_REPORT_URL__")
+    comment.append(f"### 🌐 [**Open the full interactive report**]({html_url})")
+    comment.append("*Test list, failures, per-file coverage and build log in one page – no zip download needed.*\n")
+
     # DMG Artifact Section
     comment.append("### 📦 Built Installer (Apple Silicon DMG)")
     if dmg_exists:
@@ -176,6 +251,15 @@ def main():
     comment.append(f"| **Passed** | `{test_summary['passed']}` |")
     comment.append(f"| **Failed** | `{test_summary['failed']}` |")
     comment.append(f"| **Execution Time** | `{test_summary['duration']}` |\n")
+
+    if test_summary["issues"]:
+        comment.append("<details open><summary><b>Failures</b></summary>\n")
+        for issue in test_summary["issues"][:25]:
+            loc = f" (`{issue['location']}`)" if issue["location"] else ""
+            comment.append(f"- **`{issue['test']}`**{loc}: {issue['message']}")
+        if len(test_summary["issues"]) > 25:
+            comment.append(f"- …and {len(test_summary['issues']) - 25} more – see the full report.")
+        comment.append("\n</details>\n")
 
     if test_summary["suites"]:
         comment.append("<details><summary><b>View Individual Test Details</b></summary>\n")
@@ -215,7 +299,25 @@ def main():
     with open("test_report.md", "w", encoding="utf-8") as f:
         f.write(pr_comment_content)
 
-    print("Generated pr_comment.md and test_report.md successfully.")
+    # Write the self-contained HTML report
+    html = render_html(
+        test_summary,
+        cov_info,
+        {
+            "commit": commit_sha,
+            "branch": ref_name,
+            "run_id": run_id,
+            "run_url": run_url,
+            "repo": repo,
+            "dmg": {"size": dmg_size, "sha": dmg_sha} if dmg_exists else None,
+            "log_path": log_path,
+            "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        },
+    )
+    with open("test_report.html", "w", encoding="utf-8") as f:
+        f.write(html)
+
+    print("Generated pr_comment.md, test_report.md and test_report.html successfully.")
 
 if __name__ == "__main__":
     main()

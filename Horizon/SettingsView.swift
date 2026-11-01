@@ -28,12 +28,16 @@ struct SettingsView: View {
         }
     }
 
-    @State private var selectedTab: SettingsTab = .accounts
+    @State private var selectedTab: SettingsTab
     @State private var showAddAccountSheet = false
     @State private var accountToDelete: RemoteAccount? = nil
     @State private var showDeleteConfirmation = false
     @State private var accountToLogout: RemoteAccount? = nil
     @State private var showLogoutConfirmation = false
+
+    init(initialTab: SettingsTab = .accounts) {
+        _selectedTab = State(initialValue: initialTab)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
