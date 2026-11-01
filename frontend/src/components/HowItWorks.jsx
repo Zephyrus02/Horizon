@@ -8,19 +8,26 @@ const steps = [
   },
   {
     icon: 'disk',
-    title: 'macOS NFS client',
-    body: 'The built-in client talks to a local server on 127.0.0.1.',
+    title: 'Built-in macOS support',
+    body: 'Your Mac treats your cloud as just another drive.',
   },
   {
     icon: 'cpu',
-    title: 'rclone + VFS cache',
-    body: 'Chunked reads, read-ahead and write-back, supervised by Horizon.',
+    title: 'Horizon',
+    body: 'Fetches files in pieces and keeps recent ones nearby for speed.',
   },
   {
     icon: 'cloud',
     title: 'Your cloud',
-    body: 'Data flows over HTTPS range requests, straight to the provider.',
+    body: 'Files travel securely, straight to and from your provider.',
   },
+]
+
+const specs = [
+  { term: 'Files open instantly', desc: 'Horizon grabs just the first few megabytes, so documents and videos open in under a fifth of a second.' },
+  { term: 'Video plays smoothly', desc: 'It loads ahead of your player, so scrubbing through 4K footage never stutters.' },
+  { term: 'Your disk stays in check', desc: 'Recently used files are kept for 24 hours, using at most 50 GB of space.' },
+  { term: 'Saves happen in the background', desc: 'Changes upload a few seconds after you save, so you never wait on the network.' },
 ]
 
 export default function HowItWorks() {
@@ -31,8 +38,8 @@ export default function HowItWorks() {
           <span className="eyebrow">How it works</span>
           <h2>A thin, native layer over a proven engine.</h2>
           <p>
-            Horizon supervises a tuned <code>rclone nfsmount</code> process and the macOS NFS
-            client does the rest. Your files never pass through anyone else&rsquo;s servers.
+            Horizon connects your cloud account to Finder using technology already built into your
+            Mac. Your files never pass through anyone else&rsquo;s servers.
           </p>
         </header>
 
@@ -50,48 +57,20 @@ export default function HowItWorks() {
 
         <div className="split">
           <div className="split__text" data-reveal>
-            <h3>Tuned defaults, out of the box.</h3>
+            <h3>Tuned for you, out of the box.</h3>
             <p>
-              Every mount ships with flags tuned for instant opens, smooth sequential playback
-              and burst-friendly API usage — no config files to hand-edit.
+              Horizon comes pre-configured for fast opens, smooth video playback and gentle use of
+              your cloud account. There is nothing to set up and no settings to tweak.
             </p>
-            <ul className="checklist">
-              <li>
-                <Icon name="check" size={16} /> 8 MB initial chunks for sub-150 ms opens
-              </li>
-              <li>
-                <Icon name="check" size={16} /> 256 MB read-ahead for 4K video
-              </li>
-              <li>
-                <Icon name="check" size={16} /> 50 GB capped disk cache, retained for 24 h
-              </li>
-              <li>
-                <Icon name="check" size={16} /> 5 s write-back before uploads begin
-              </li>
-            </ul>
           </div>
-          <div className="code-window" data-reveal style={{ '--delay': '120ms' }}>
-            <div className="code-window__bar">
-              <i />
-              <i />
-              <i />
-              <span>rclone nfsmount</span>
-            </div>
-            <pre>
-              <code>
-                <span className="tok-cmd">rclone nfsmount</span> gdrive: ~/GDrive \{'\n'}
-                {'  '}<span className="tok-flag">--vfs-cache-mode</span> full \{'\n'}
-                {'  '}<span className="tok-flag">--vfs-read-chunk-size</span> 8M \{'\n'}
-                {'  '}<span className="tok-flag">--vfs-read-chunk-streams</span> 4 \{'\n'}
-                {'  '}<span className="tok-flag">--vfs-read-ahead</span> 256M \{'\n'}
-                {'  '}<span className="tok-flag">--vfs-cache-max-size</span> 50G \{'\n'}
-                {'  '}<span className="tok-flag">--vfs-write-back</span> 5s \{'\n'}
-                {'  '}<span className="tok-flag">--dir-cache-time</span> 72h \{'\n'}
-                {'  '}<span className="tok-flag">--drive-chunk-size</span> 64M \{'\n'}
-                {'  '}<span className="tok-flag">--rc</span> 127.0.0.1:5572
-              </code>
-            </pre>
-          </div>
+          <dl className="specs" data-reveal style={{ '--delay': '120ms' }}>
+            {specs.map((x) => (
+              <div key={x.term} className="specs__row">
+                <dt>{x.term}</dt>
+                <dd>{x.desc}</dd>
+              </div>
+            ))}
+          </dl>
         </div>
       </div>
     </section>
