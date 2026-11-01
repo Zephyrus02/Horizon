@@ -18,7 +18,7 @@ struct SetupView: View {
         case complete = 2
     }
 
-    @State private var currentStep: SetupStep = .welcome
+    @State private var currentStep: SetupStep
     @State private var connectionName: String = "Google Drive"
     @State private var mountPath: String = ("~/Google Drive" as NSString).expandingTildeInPath
     @State private var isCustomMount: Bool = false
@@ -27,6 +27,10 @@ struct SetupView: View {
     @State private var showAdvancedOptions: Bool = false
     @State private var customClientId: String = ""
     @State private var customClientSecret: String = ""
+
+    init(initialStep: SetupStep = .welcome) {
+        _currentStep = State(initialValue: initialStep)
+    }
 
     var body: some View {
         VStack(spacing: 0) {

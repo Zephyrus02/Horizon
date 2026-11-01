@@ -42,18 +42,69 @@ def parse_test_log(log_path):
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
 
-    # Look for executed tests summary: "Executed 2 tests, with 0 failures (0 unexpected) in 0.045 (0.046) seconds"
-    exec_matches = re.findall(r"Executed\s+(\d+)\s+tests?,\s+with\s+(\d+)\s+failures?", content)
-    if exec_matches:
-        total_exec = sum(int(m[0]) for m in exec_matches)
-        total_fail = sum(int(m[1]) for m in exec_matches)
-        summary["total"] = total_exec
-        summary["failed"] = total_fail
-        summary["passed"] = max(0, total_exec - total_fail)
+    # --- XCTest summary -------------------------------------------------------------
+    # "Executed 2 tests, with 0 failures (0 unexpected) in 0.045 (0.046) seconds"
+    # With only Swift Testing tests this line still appears, as "Executed 0 tests".
+    xc_total = xc_failed = 0
+    xc_duration = None
+    for m in re.finditer(
+        r"Executed\s+(\d+)\s+tests?,\s+with\s+(\d+)\s+failures?.*?in\s+([\d\.]+)\s+\(([\d\.]+)\)\s+seconds",
+        content,
+    ):
+        xc_total += int(m.group(1))
+        xc_failed += int(m.group(2))
+        xc_duration = m.group(1) and m.group(3)
 
-    duration_match = re.search(r"in\s+([\d\.]+)\s+\(([\d\.]+)\)\s+seconds", content)
-    if duration_match:
-        summary["duration"] = f"{duration_match.group(1)}s"
+    # --- Swift Testing summary ------------------------------------------------------
+    # "✔ Test run with 152 tests in 14 suites passed after 27.425 seconds."
+    # "✘ Test run with 152 tests in 14 suites failed after 59.5 seconds with 3 issues."
+    st_total = 0
+    st_failed = 0
+    st_duration = None
+    run_matches = re.findall(
+        r"Test run with\s+(\d+)\s+tests?(?:\s+in\s+\d+\s+suites?)?\s+(passed|failed)\s+after\s+([\d\.]+)\s+seconds(?:\s+with\s+(\d+)\s+issues?)?",
+        content,
+    )
+    for total, outcome, secs, issues in run_matches:
+        st_total += int(total)
+        st_duration = secs
+        if outcome == "failed":
+            # Number of failed tests is derived from the per-test lines below;
+            # fall back to the issue count if none could be parsed.
+            st_failed = max(st_failed, 1)
+
+    # --- Individual test results ----------------------------------------------------
+    # XCTest:         Test Case '-[HorizonTests testRemoteNameSanitization]' passed (0.002 seconds)
+    # Swift Testing:  ✔ Test testRemoteNameSanitization() passed after 0.001 seconds.
+    #                 ✘ Test "parameterized name" with 3 test cases failed after 0.01 seconds with 1 issue.
+    test_cases = re.findall(
+        r"Test (?:Case ['\"]-\[(\w+)\s+(\w+)\]['\"]|(\w+)\(\)|\"([^\"]+)\"\s+with\s+\d+\s+test\s+cases?)\s+(passed|failed)",
+        content,
+    )
+    seen = set()
+    st_failed_cases = 0
+    for tc in test_cases:
+        suite = tc[0] or "SwiftTesting"
+        name = tc[1] or tc[2] or tc[3]
+        res = tc[4]
+        key = (suite, name, res)
+        if key in seen:
+            continue
+        seen.add(key)
+        summary["suites"].setdefault(suite, []).append({"name": name, "status": res.upper()})
+        if not tc[0] and res == "failed":
+            st_failed_cases += 1
+    if st_failed:
+        st_failed = max(st_failed_cases, 1)
+
+    summary["total"] = xc_total + st_total
+    summary["failed"] = xc_failed + st_failed
+    summary["passed"] = max(0, summary["total"] - summary["failed"])
+
+    durations = [float(d) for d in (xc_duration, st_duration) if d is not None]
+    if durations:
+        # XCTest and Swift Testing run back to back, so the wall time is their sum.
+        summary["duration"] = f"{sum(durations):.3f}s"
 
     if "** TEST SUCCEEDED **" in content:
         summary["status"] = "PASSED"
@@ -61,17 +112,6 @@ def parse_test_log(log_path):
         summary["status"] = "FAILED"
     else:
         summary["status"] = "PASSED" if summary["failed"] == 0 and summary["total"] > 0 else "UNKNOWN"
-
-    # Find individual test cases
-    # e.g.: Test Case '-[HorizonTests testRemoteNameSanitization]' passed (0.002 seconds)
-    test_cases = re.findall(r"Test (?:Case ['\"]-\[(\w+)\s+(\w+)\]['\"]|(\w+)\(\))\s+(passed|failed)", content)
-    for tc in test_cases:
-        suite = tc[0] or "SwiftTesting"
-        name = tc[1] or tc[2]
-        res = tc[3]
-        if suite not in summary["suites"]:
-            summary["suites"][suite] = []
-        summary["suites"][suite].append({"name": name, "status": res.upper()})
 
     return summary
 

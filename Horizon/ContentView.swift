@@ -197,7 +197,7 @@ struct ContentView: View {
         }
     }
 
-    private var statusSummaryText: String {
+    var statusSummaryText: String {
         if driveManager.accounts.isEmpty {
             return "No Accounts"
         }

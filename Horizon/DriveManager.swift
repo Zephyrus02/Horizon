@@ -10,6 +10,65 @@ import Foundation
 import Combine
 import ServiceManagement
 
+// MARK: - Dependency Seams (injectable for tests, live by default)
+
+/// Abstraction over `SMAppService.mainApp` so launch-at-login can be tested without
+/// registering the test host as a real login item.
+protocol LaunchAtLoginService {
+    var isEnabled: Bool { get }
+    func register() throws
+    func unregister() throws
+}
+
+struct SystemLaunchAtLoginService: LaunchAtLoginService {
+    var isEnabled: Bool { SMAppService.mainApp.status == .enabled }
+    func register() throws { try SMAppService.mainApp.register() }
+    func unregister() throws { try SMAppService.mainApp.unregister() }
+}
+
+/// Everything `DriveManager` touches outside its own memory: paths, persistence,
+/// processes, mounts and Finder. `live()` reproduces the production behaviour.
+struct DriveManagerEnvironment {
+    var appSupportDir: String
+    var cacheDir: String
+    var logFile: String
+    var defaultMountPath: String
+    var legacyConfigPath: String
+    var database: AccountDatabase
+    var userDefaults: UserDefaults
+    var launchAtLogin: LaunchAtLoginService
+    var rcloneLocator: @Sendable () -> String?
+    var mountChecker: @Sendable (String) -> Bool
+    var unmounter: @Sendable (String) -> Void
+    var urlOpener: (URL) -> Void
+    /// Pause after a disconnect before deleting/logging out an account (nanoseconds).
+    var shutdownGracePeriod: UInt64
+    /// How long to wait for a mount to appear before giving up (seconds).
+    var mountTimeout: TimeInterval
+    /// Interval between mount readiness checks (nanoseconds).
+    var mountPollInterval: UInt64
+
+    static func live() -> DriveManagerEnvironment {
+        DriveManagerEnvironment(
+            appSupportDir: ("~/Library/Application Support/Horizon" as NSString).expandingTildeInPath,
+            cacheDir: ("~/Library/Caches/Horizon/rclone" as NSString).expandingTildeInPath,
+            logFile: ("~/Library/Logs/Horizon/rclone.log" as NSString).expandingTildeInPath,
+            defaultMountPath: ("~/GDrive" as NSString).expandingTildeInPath,
+            legacyConfigPath: ("~/.config/rclone/rclone.conf" as NSString).expandingTildeInPath,
+            database: AccountDatabase.shared,
+            userDefaults: .standard,
+            launchAtLogin: SystemLaunchAtLoginService(),
+            rcloneLocator: { DriveManager.findRcloneExecutable() },
+            mountChecker: { DriveManager.isPathMounted($0) },
+            unmounter: { DriveManager.unmountVolume(path: $0) },
+            urlOpener: { NSWorkspace.shared.open($0) },
+            shutdownGracePeriod: 1_000_000_000,
+            mountTimeout: 15.0,
+            mountPollInterval: 500_000_000
+        )
+    }
+}
+
 @MainActor
 final class DriveManager: ObservableObject {
     static let shared = DriveManager()
@@ -63,14 +122,15 @@ final class DriveManager: ObservableObject {
     private var userInitiatedDisconnects: Set<String> = []
     private var currentAuthProcess: Process?
 
-    private let onboardingKey = "hasCompletedOnboarding"
+    private let environment: DriveManagerEnvironment
+    static let onboardingKey = "hasCompletedOnboarding"
 
     var hasCompletedOnboarding: Bool {
         get {
-            UserDefaults.standard.bool(forKey: onboardingKey)
+            environment.userDefaults.bool(forKey: Self.onboardingKey)
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: onboardingKey)
+            environment.userDefaults.set(newValue, forKey: Self.onboardingKey)
         }
     }
 
@@ -82,12 +142,13 @@ final class DriveManager: ObservableObject {
         return accounts.filter { stateForAccount($0) == .connected }.count
     }
 
-    init() {
-        self.defaultMountPath = (("~/GDrive" as NSString).expandingTildeInPath)
-        self.appSupportDir = (("~/Library/Application Support/Horizon" as NSString).expandingTildeInPath)
-        self.configPath = (("~/Library/Application Support/Horizon/rclone.conf" as NSString).expandingTildeInPath)
-        self.cacheDir = (("~/Library/Caches/Horizon/rclone" as NSString).expandingTildeInPath)
-        self.logFile = (("~/Library/Logs/Horizon/rclone.log" as NSString).expandingTildeInPath)
+    init(environment: DriveManagerEnvironment = .live()) {
+        self.environment = environment
+        self.defaultMountPath = environment.defaultMountPath
+        self.appSupportDir = environment.appSupportDir
+        self.configPath = (environment.appSupportDir as NSString).appendingPathComponent("rclone.conf")
+        self.cacheDir = environment.cacheDir
+        self.logFile = environment.logFile
 
         // Ensure necessary base directories exist
         try? FileManager.default.createDirectory(atPath: appSupportDir, withIntermediateDirectories: true)
@@ -99,9 +160,7 @@ final class DriveManager: ObservableObject {
         migrateDefaultConfigIfNeeded()
 
         // Check launch at login status
-        if #available(macOS 13.0, *) {
-            self.isLaunchAtLoginEnabled = SMAppService.mainApp.status == .enabled
-        }
+        self.isLaunchAtLoginEnabled = environment.launchAtLogin.isEnabled
 
         // Initialize SQLite and load accounts
         loadAccountsSync()
@@ -109,7 +168,7 @@ final class DriveManager: ObservableObject {
 
     private func migrateDefaultConfigIfNeeded() {
         if !FileManager.default.fileExists(atPath: configPath) {
-            let legacyConfig = (("~/.config/rclone/rclone.conf" as NSString).expandingTildeInPath)
+            let legacyConfig = environment.legacyConfigPath
             if FileManager.default.fileExists(atPath: legacyConfig) {
                 try? FileManager.default.copyItem(atPath: legacyConfig, toPath: configPath)
             }
@@ -171,7 +230,7 @@ final class DriveManager: ObservableObject {
 
     private func loadAccountsSync() {
         // 1. Fetch from SQLite Database
-        var dbAccounts = AccountDatabase.shared.getAllAccounts()
+        var dbAccounts = environment.database.getAllAccounts()
 
         // 2. Discover remotes in rclone.conf (for automatic migration on first launch)
         let configRemotes = fetchRcloneConfigRemotes()
@@ -196,18 +255,18 @@ final class DriveManager: ObservableObject {
                     accountName: displayName,
                     accountEmail: nil,
                     mountPath: mountPath,
-                    isConnected: Self.isPathMounted(mountPath),
+                    isConnected: environment.mountChecker(mountPath),
                     autoConnect: true,
                     createdAt: Date()
                 )
-                AccountDatabase.shared.saveAccount(newAcc)
+                environment.database.saveAccount(newAcc)
                 dbAccounts.append(newAcc)
             }
         }
 
         // 3. Check mount states for all accounts
         for i in dbAccounts.indices {
-            let isMounted = Self.isPathMounted(dbAccounts[i].mountPath)
+            let isMounted = environment.mountChecker(dbAccounts[i].mountPath)
             dbAccounts[i].isConnected = isMounted
             accountStates[dbAccounts[i].id] = isMounted ? .connected : .disconnected
         }
@@ -221,7 +280,7 @@ final class DriveManager: ObservableObject {
     }
 
     private func fetchRcloneConfigRemotes() -> [String: [String: Any]] {
-        guard let rclone = Self.findRcloneExecutable() else { return [:] }
+        guard let rclone = environment.rcloneLocator() else { return [:] }
         let pipe = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: rclone)
@@ -307,7 +366,7 @@ final class DriveManager: ObservableObject {
         clientId: String? = nil,
         clientSecret: String? = nil
     ) async -> Bool {
-        guard let rclone = Self.findRcloneExecutable() else {
+        guard let rclone = environment.rcloneLocator() else {
             self.authError = "rclone executable was not found."
             return false
         }
@@ -406,7 +465,7 @@ final class DriveManager: ObservableObject {
             )
 
             // Persist into SQLite
-            AccountDatabase.shared.saveAccount(newAccount)
+            environment.database.saveAccount(newAccount)
 
             self.accounts.append(newAccount)
             self.activeAccount = newAccount
@@ -438,13 +497,13 @@ final class DriveManager: ObservableObject {
     // MARK: - Multi-Mount Connect & Disconnect
 
     func connectAccount(_ account: RemoteAccount) {
-        guard let rcloneExecutable = Self.findRcloneExecutable() else {
+        guard let rcloneExecutable = environment.rcloneLocator() else {
             accountStates[account.id] = .error("rclone executable not found")
             updateOverallState()
             return
         }
 
-        if Self.isPathMounted(account.mountPath) {
+        if environment.mountChecker(account.mountPath) {
             accountStates[account.id] = .connected
             updateAccountConnection(id: account.id, isConnected: true)
             updateOverallState()
@@ -508,14 +567,14 @@ final class DriveManager: ObservableObject {
         process.executableURL = URL(fileURLWithPath: rcloneExecutable)
         process.arguments = arguments
 
-        var environment = ProcessInfo.processInfo.environment
+        var processEnv = ProcessInfo.processInfo.environment
         let extraPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        if let existing = environment["PATH"], !existing.isEmpty {
-            environment["PATH"] = extraPaths + ":" + existing
+        if let existing = processEnv["PATH"], !existing.isEmpty {
+            processEnv["PATH"] = extraPaths + ":" + existing
         } else {
-            environment["PATH"] = extraPaths
+            processEnv["PATH"] = extraPaths
         }
-        process.environment = environment
+        process.environment = processEnv
 
         let accountId = account.id
 
@@ -548,13 +607,16 @@ final class DriveManager: ObservableObject {
         }
 
         // Readiness poll
+        let mountTimeout = environment.mountTimeout
+        let pollInterval = environment.mountPollInterval
+        let mountChecker = environment.mountChecker
         Task {
             let startTime = Date()
             var isMounted = false
 
-            while Date().timeIntervalSince(startTime) < 15.0 {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                if Self.isPathMounted(mountPath) {
+            while Date().timeIntervalSince(startTime) < mountTimeout {
+                try? await Task.sleep(nanoseconds: pollInterval)
+                if mountChecker(mountPath) {
                     isMounted = true
                     break
                 }
@@ -585,10 +647,11 @@ final class DriveManager: ObservableObject {
         let proc = runningProcesses.removeValue(forKey: accountId)
         accountRcPorts.removeValue(forKey: accountId)
         let mountLocation = account.mountPath
+        let unmounter = environment.unmounter
 
         Task.detached(priority: .userInitiated) { [weak self] in
             // 1. Unmount volume FIRST while rclone is still alive
-            Self.unmountVolume(path: mountLocation)
+            unmounter(mountLocation)
 
             // 2. Terminate rclone process
             if let proc = proc, proc.isRunning {
@@ -635,7 +698,7 @@ final class DriveManager: ObservableObject {
         if let idx = accounts.firstIndex(where: { $0.id == id }) {
             accounts[idx].isConnected = isConnected
         }
-        AccountDatabase.shared.updateConnectionStatus(id: id, isConnected: isConnected)
+        environment.database.updateConnectionStatus(id: id, isConnected: isConnected)
     }
 
     func updateOverallState() {
@@ -687,7 +750,7 @@ final class DriveManager: ObservableObject {
 
     func disconnectSync() {
         for account in accounts {
-            Self.unmountVolume(path: account.mountPath)
+            environment.unmounter(account.mountPath)
             if let proc = runningProcesses[account.id], proc.isRunning {
                 proc.terminate()
             }
@@ -699,10 +762,10 @@ final class DriveManager: ObservableObject {
 
     func deleteAccount(_ account: RemoteAccount) async {
         disconnectAccount(account)
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        try? await Task.sleep(nanoseconds: environment.shutdownGracePeriod)
 
         // Remove from rclone config
-        if let rclone = Self.findRcloneExecutable() {
+        if let rclone = environment.rcloneLocator() {
             await Task.detached { [configPath] in
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: rclone)
@@ -715,7 +778,7 @@ final class DriveManager: ObservableObject {
         }
 
         // Remove from SQLite Database
-        AccountDatabase.shared.deleteAccount(id: account.id)
+        environment.database.deleteAccount(id: account.id)
 
         // Remove from memory
         accounts.removeAll { $0.id == account.id }
@@ -735,9 +798,9 @@ final class DriveManager: ObservableObject {
 
     func logoutAccount(_ account: RemoteAccount) async {
         disconnectAccount(account)
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        try? await Task.sleep(nanoseconds: environment.shutdownGracePeriod)
 
-        guard let rclone = Self.findRcloneExecutable() else { return }
+        guard let rclone = environment.rcloneLocator() else { return }
 
         await Task.detached { [configPath] in
             let procDisconnect = Process()
@@ -757,7 +820,7 @@ final class DriveManager: ObservableObject {
             procDelete.waitUntilExit()
         }.value
 
-        AccountDatabase.shared.deleteAccount(id: account.id)
+        environment.database.deleteAccount(id: account.id)
         accounts.removeAll { $0.id == account.id }
         accountStates.removeValue(forKey: account.id)
         accountRcPorts.removeValue(forKey: account.id)
@@ -831,18 +894,17 @@ final class DriveManager: ObservableObject {
     // MARK: - Launch at Login
 
     func toggleLaunchAtLogin() {
-        if #available(macOS 13.0, *) {
-            do {
-                if SMAppService.mainApp.status == .enabled {
-                    try SMAppService.mainApp.unregister()
-                    isLaunchAtLoginEnabled = false
-                } else {
-                    try SMAppService.mainApp.register()
-                    isLaunchAtLoginEnabled = true
-                }
-            } catch {
-                print("Failed to toggle launch at login: \(error)")
+        let service = environment.launchAtLogin
+        do {
+            if service.isEnabled {
+                try service.unregister()
+                isLaunchAtLoginEnabled = false
+            } else {
+                try service.register()
+                isLaunchAtLoginEnabled = true
             }
+        } catch {
+            print("Failed to toggle launch at login: \(error)")
         }
     }
 
@@ -853,22 +915,22 @@ final class DriveManager: ObservableObject {
             openAccountInFinder(active)
         } else {
             let url = URL(fileURLWithPath: activeMountPath)
-            NSWorkspace.shared.open(url)
+            environment.urlOpener(url)
         }
     }
 
     func openAccountInFinder(_ account: RemoteAccount) {
         let url = URL(fileURLWithPath: account.mountPath)
-        NSWorkspace.shared.open(url)
+        environment.urlOpener(url)
     }
 
     func openLogs() {
         let url = URL(fileURLWithPath: logFile)
         if FileManager.default.fileExists(atPath: logFile) {
-            NSWorkspace.shared.open(url)
+            environment.urlOpener(url)
         } else {
             let logDir = url.deletingLastPathComponent()
-            NSWorkspace.shared.open(logDir)
+            environment.urlOpener(logDir)
         }
     }
 
